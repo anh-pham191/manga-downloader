@@ -1,0 +1,17 @@
+# Build output
+/bin/
+/downloader
+
+# Local downloads (do not commit user content)
+/downloads/
+
+# Atomic-write tempfiles
+*.part
+
+# macOS
+.DS_Store
+
+# Editor / agent state
+.claude/
+.idea/
+.vscode/
