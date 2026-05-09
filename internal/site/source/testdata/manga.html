@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="vi">
+<head><meta charset="utf-8"><title>Sample Manga</title></head>
+<body>
+<div class="book_info">
+  <h1 class="book_other">Sample Manga</h1>
+</div>
+
+<!--
+  Synthetic fixture for parser tests. Mirrors the DOM contract used by
+  this site family: a list of `.works-chapter-item`s, each
+  with a single anchor inside `.name-chap` whose href points at the
+  chapter page and whose text contains the chapter number.
+
+  Real HTML, captured via chromedp during M3 smoke testing, replaces
+  this file. The same tests must continue to pass against the real
+  fixture; if they don't, either the parser or the fixture needs
+  updating before relying on the live downloader.
+-->
+
+<div class="works-chapter-list">
+  <div class="works-chapter-item">
+    <div class="name-chap"><a href="https://example.com/truyen-tranh/sample-manga-chap-3">Chapter 3</a></div>
+    <div class="time-chap">2 ngày trước</div>
+  </div>
+  <div class="works-chapter-item">
+    <div class="name-chap"><a href="https://example.com/truyen-tranh/sample-manga-chap-2">Chapter 2</a></div>
+    <div class="time-chap">3 ngày trước</div>
+  </div>
+  <div class="works-chapter-item">
+    <div class="name-chap"><a href="/truyen-tranh/sample-manga-chap-1-5">Chapter 1.5</a></div>
+    <div class="time-chap">5 ngày trước</div>
+  </div>
+  <div class="works-chapter-item">
+    <div class="name-chap"><a href="/truyen-tranh/sample-manga-chap-1">Chapter 1</a></div>
+    <div class="time-chap">10 ngày trước</div>
+  </div>
+</div>
+</body>
+</html>
