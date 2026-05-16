@@ -140,6 +140,62 @@ func TestStageAndRename_PreservesOriginalAndAppends(t *testing.T) {
 	}
 }
 
+// TestStageAndRename_LargeArchiveTakesOSZipPath forces the OS-zip
+// branch by lowering the threshold below the existing archive's
+// size. Verifies the existing entry survives and the new entry is
+// added — the same correctness contract as the Go-zip path, just
+// exercised through `os/exec` to `zip`.
+func TestStageAndRename_LargeArchiveTakesOSZipPath(t *testing.T) {
+	// Lower the threshold so any non-empty archive trips the OS path.
+	saved := zip64SafeThreshold
+	zip64SafeThreshold = 1
+	t.Cleanup(func() { zip64SafeThreshold = saved })
+
+	p := buildCBZ(t, map[string][]byte{
+		"chap-0001/001.jpg": []byte("AAA"),
+	})
+
+	scratch := t.TempDir()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(scratch, "chap-0001"), 0o755))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0001", "zzz-comments.png"), []byte("PNG"), 0o644))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0001", ".ok"), nil, 0o644))
+
+	if err := StageAndRename(p, scratch); err != nil {
+		t.Fatalf("StageAndRename via OS zip: %v", err)
+	}
+
+	zr, err := zip.OpenReader(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	got := map[string][]byte{}
+	for _, f := range zr.File {
+		rc, _ := f.Open()
+		b, _ := io.ReadAll(rc)
+		rc.Close()
+		got[f.Name] = b
+	}
+	want := map[string]string{
+		"chap-0001/001.jpg":          "AAA",
+		"chap-0001/zzz-comments.png": "PNG",
+	}
+	for k, v := range want {
+		if string(got[k]) != v {
+			t.Errorf("%s: got %q, want %q", k, got[k], v)
+		}
+	}
+	if _, leaked := got["chap-0001/.ok"]; leaked {
+		t.Error(".ok marker leaked into OS-zip output")
+	}
+}
+
 func TestStageAndRename_CreatesFreshIfTargetMissing(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "fresh.cbz")
