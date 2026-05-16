@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 
 	"github.com/anhpham/downloader/internal/fetcher"
+	"github.com/anhpham/downloader/internal/layout"
 	"github.com/anhpham/downloader/internal/site"
 )
 
@@ -85,7 +86,7 @@ func (d *Downloader) Run(ctx context.Context, mangaURL string) (Result, error) {
 		return Result{}, errors.New("no chapters match the requested range")
 	}
 
-	width := folderWidth(chapters)
+	width := layout.Width(chapters)
 
 	var (
 		mu       sync.Mutex
@@ -105,7 +106,7 @@ func (d *Downloader) Run(ctx context.Context, mangaURL string) (Result, error) {
 	}
 	var pending []job
 	for _, c := range chapters {
-		folder := chapterFolder(mangaRoot, c.Number, width)
+		folder := layout.Folder(mangaRoot, c.Number, width)
 		if d.Resume && hasDoneSentinel(folder) {
 			res.Skipped++
 			continue
@@ -206,7 +207,12 @@ func (d *Downloader) runChapter(ctx context.Context, c site.Chapter, folder stri
 		return errors.New("chapter has zero images")
 	}
 
-	imgWidth := digitWidth(len(images))
+	// Compute padding width for image filenames (separate from chapter
+	// folder padding because images have a minimum width of 3).
+	imgWidth := 1
+	for n := len(images); n > 0; n /= 10 {
+		imgWidth++
+	}
 	if imgWidth < 3 {
 		imgWidth = 3
 	}
@@ -270,56 +276,6 @@ func chapterNumeric(s string) (float64, bool) {
 	return f, true
 }
 
-// folderWidth picks a zero-padding width wide enough for the largest
-// chapter number, with a floor of 4 so re-runs that pick up a longer
-// list don't reshuffle older folder names.
-func folderWidth(chapters []site.Chapter) int {
-	max := 0
-	for _, c := range chapters {
-		i := strings.IndexByte(c.Number, '.')
-		whole := c.Number
-		if i != -1 {
-			whole = c.Number[:i]
-		}
-		if n, err := strconv.Atoi(whole); err == nil && n > max {
-			max = n
-		}
-	}
-	w := digitWidth(max)
-	if w < 4 {
-		w = 4
-	}
-	return w
-}
-
-func digitWidth(n int) int {
-	if n <= 0 {
-		return 1
-	}
-	w := 0
-	for n > 0 {
-		w++
-		n /= 10
-	}
-	return w
-}
-
-// chapterFolder turns a published number like "227.5" into a
-// filesystem-friendly, lexicographically-sortable name like
-// "chap-0227-5".
-func chapterFolder(root, number string, width int) string {
-	whole, frac, hasFrac := strings.Cut(number, ".")
-	n, err := strconv.Atoi(whole)
-	if err != nil {
-		// Unparseable — fall back to the raw value, sanitised.
-		return filepath.Join(root, "chap-"+strings.ReplaceAll(number, "/", "_"))
-	}
-	name := fmt.Sprintf("chap-%0*d", width, n)
-	if hasFrac {
-		name += "-" + frac
-	}
-	return filepath.Join(root, name)
-}
 
 func hasDoneSentinel(folder string) bool {
 	_, err := os.Stat(filepath.Join(folder, ".done"))
