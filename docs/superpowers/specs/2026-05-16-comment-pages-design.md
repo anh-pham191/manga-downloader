@@ -161,8 +161,10 @@ were tied to chapter folders on disk, which no longer exist.
 ```
 internal/
 ├── layout/                    // NEW — shared chapter-folder naming
-│   ├── folder.go              // Width([]site.Chapter) int;
-│   │                           // Folder(root, number, width) string
+│   ├── folder.go              // Width, Folder, InferredWidth,
+│   │                           // ImageName(idx) string,
+│   │                           // IsImageEntry(name) bool,
+│   │                           // CommentsFilename const
 │   └── folder_test.go
 ├── fetcher/
 │   └── …                       // Existing GET, plus new Post (below).
@@ -183,25 +185,106 @@ internal/
 │       ├── NotoSans-Bold.ttf
 │       └── twemoji/<seq>.png   // 1f468-200d-1f469-200d-1f467.png
 ├── archive/                   // NEW — read .cbz + safe stage-and-rename
-│   ├── reader.go               // ListChapterDirs, HasComments,
-│   │                           // CopyRawTo (CreateRaw + OpenRaw)
+│   ├── reader.go               // Inspect, InferredWidth (delegates
+│   │                           // to layout.InferredWidth)
 │   ├── writer.go               // StageAndRename
 │   └── archive_test.go
+├── pipeline/                  // NEW — wires the per-run flow
+│   ├── pipeline.go             // Run(ctx, Opts) error
+│   ├── plan.go                 // Plan(mode, chapters, inspection) []Task
+│   ├── plan_test.go            // mode-matrix dispatch tests
+│   └── pipeline_test.go
 └── downloader/                // Shrinks: see "downloader residuals"
-    ├── images.go               // ImageFetch(ctx, chapURL, dest) error
+    ├── images.go               // FetchChapterImages(ctx, chapURL,
+    │                           //   dest, layout.ImageName) error
     └── images_test.go
 ```
+
+The orchestration entry point:
+
+```go
+// Package pipeline runs one manga sync end-to-end.
+package pipeline
+
+type Mode int
+const (
+    SyncComments Mode = iota
+    Resume
+    SyncManga
+)
+
+type Opts struct {
+    Mode         Mode
+    MangaURL     string
+    Root         string         // <root> (e.g. ~/Documents/Manga)
+    Name         string         // <name>; archive lives at <root>/<name>.cbz
+    From, To     int            // 0 = unbounded
+    Concurrency  int            // default 4
+    Site         site.Site      // injected (testable)
+    Fetcher      fetcher.Fetcher
+    Renderer     comments.Renderer // injected
+    Verbose      bool
+    Logger       *log.Logger
+}
+
+// Run executes one of the three modes. Returns nil on success;
+// non-nil errors are user-presentable (Cloudflare expiry, lock
+// contention, verification failure, etc.).
+func Run(ctx context.Context, opts Opts) error
+```
+
+`Plan(mode, chapters, inspection) []Task` is the pure-function
+core of mode dispatch — the lightweight matrix tests target this
+directly.
+
+### Image-name format lives in one place
+
+The downloader writes images as `001.jpg`, `002.jpg`, … (zero-
+padded to 3 digits). The archive reader matches the same pattern
+to populate `Inspect.Have`. To prevent the two from drifting, both
+go through `internal/layout/`:
+
+```go
+// ImageName returns the filename for the N-th image in a chapter
+// (1-indexed): "001.jpg", "002.jpg", …
+func ImageName(index int, ext string) string
+
+// IsImageEntry reports whether a zip entry name matches the
+// downloader's image-name pattern inside a chapter folder, e.g.
+// "chap-0001/001.jpg". The comments PNG ("zzz-comments.png") is
+// not an image entry.
+func IsImageEntry(zipEntryName string) bool
+
+// CommentsFilename is the fixed name used for the rendered
+// comments PNG inside a chapter folder.
+const CommentsFilename = "zzz-comments.png"
+```
+
+The downloader calls `ImageName`; the archive reader calls
+`IsImageEntry`; the renderer writes to `CommentsFilename`. One
+source of truth.
 
 ### Single per-run pipeline
 
 ```
-0. Pick scratch root:
+0a. Acquire an exclusive file lock to keep concurrent invocations
+    from clobbering each other:
+        lockPath := <root>/<name>.cbz.lock
+        lock, err := flock.NewLock(lockPath, flock.NonBlocking)
+        if err: exit 2 with "another downloader is running for
+                            <name> — release the lock or wait"
+    The lock file is created if missing; it's the lock itself (an
+    OS advisory lock on its file descriptor), so unlinking on exit
+    is optional. Use github.com/gofrs/flock or syscall.Flock.
+
+0b. Pick scratch root:
        scratchRoot := filepath.Join(<root>, "." + <name> + ".scratch")
    // Co-located with <name>.cbz (NOT $TMPDIR) so a half-finished
    // run is obvious to the user. Deleted at the end of a clean
-   // run; an orphaned dir from a killed run is overwritten on
-   // re-run (os.MkdirAll is idempotent; per-chapter subdirs are
-   // re-checked via the .ok sentinel below).
+   // run. On a re-run after a kill, per-chapter subdirs WITH a
+   // `.ok` marker are kept (the work is complete); subdirs
+   // WITHOUT a `.ok` marker are RemoveAll'd and recreated before
+   // their worker starts.
 
 1. List source chapters:
        chapters := site.ListChapters(ctx, mangaURL)
@@ -256,16 +339,47 @@ internal/
 If the archive does not exist before step 5, `StageAndRename` writes
 a fresh `<name>.cbz` directly (no source entries to copy forward).
 
-### Width must see the full list
+### Width: full list AND archive-stable
 
-`filterRange` in the current `internal/downloader/downloader.go`
-aliases its input slice (`in[:0:0]` shares the underlying array),
-which means width *must* be computed on the unfiltered list — if
-width is computed after filtering, a `--from 100 --to 110` run on
-a manga with 500 chapters would pick width 3 (max filtered number
-"110"), producing `chap-100/...` instead of `chap-0100/...` and
-diverging from any existing archive's folder names. Step 1 above
-captures the order; the implementation must preserve it.
+Two distinct width hazards have to be addressed together:
+
+1. **Filter-then-width** corrupts folder names. `filterRange` in
+   the current `internal/downloader/downloader.go` aliases its
+   input slice (`in[:0:0]` shares the underlying array), so width
+   *must* be computed on the unfiltered list — otherwise a
+   `--from 100 --to 110` run on a 500-chapter manga picks width 3,
+   produces `chap-100/...` instead of `chap-0100/...`, and diverges
+   from the archive's existing names.
+2. **Mid-life growth** silently invalidates the archive. A manga
+   that goes 9,999 → 10,000 chapters upstream would otherwise jump
+   width 4 → 5, making *every* existing `chap-NNNN/` in the archive
+   un-match the new 5-wide keys. `have.Contains(folder)` would
+   return false for every existing chapter and `sync-manga` /
+   `resume` would re-download the entire back catalogue.
+
+The fix is one rule: **the effective width is the maximum of the
+width the source list needs and the width already used in the
+archive.** Once an archive has settled on 4-wide names, all future
+runs honour 4 — even if the source now wants 5. New chapters past
+the boundary still fit because the existing `Folder` logic
+zero-pads to the width given; a 6-digit chapter under a 4-width
+archive would just emit `chap-100000/` (still wider than the
+existing names, still lexicographically sortable after them).
+
+Pseudocode (step 1 of the pipeline, replacing the naked
+`width := layout.Width(chapters)`):
+
+```
+sourceWidth := layout.Width(chapters)               // full, unfiltered list
+archiveWidth := archive.InferredWidth(have)         // 0 if archive empty
+width := max(sourceWidth, archiveWidth)
+```
+
+`archive.InferredWidth` returns the consistent zero-padding width
+observed across the archive's `chap-NNNN/` entries (it's the count
+of leading `0`+digit chars in the longest run-length consistent
+prefix; 0 if no chapters are present). If the archive has mixed
+widths from past bugs, log a warning and pick the maximum.
 
 ### Fetcher changes
 
@@ -550,6 +664,9 @@ readers handle this.
 | Pure-Go verification of tmp fails (CRC mismatch / truncated) | Delete tmp, log, exit 1. Original untouched. |
 | SIGKILL between step (1) and step (6) | Tmp orphaned, original untouched. On next run, `os.Create` overwrites the orphan. (Optional: start-of-run sweep removes `*.cbz.tmp` older than 1 hour.) |
 | `sync-comments` invoked but `.cbz` does not exist | Print "no archive to backfill at `<path>`; run `sync-manga` first"; exit 0. |
+| `resume` invoked but `.cbz` does not exist | Print "no archive at `<path>`; run `sync-manga` first"; exit 0. |
+| Lock acquisition fails (another downloader is running) | Print "another downloader is running for `<name>`"; exit 2. |
+| Killed mid-run, then re-invoked | Scratch subdirs with `.ok` are reused (no re-fetch / re-render); subdirs without `.ok` are wiped and re-attempted. This survives cookie-refresh kills cleanly — already-completed chapters don't pay bandwidth twice. |
 
 ## Migration from current state
 
@@ -634,17 +751,62 @@ What moves out:
   - Crash-safety: panic injected after tmp is written but before
     rename — assert original untouched and tmp is cleaned up on
     next run.
-- **Mode dispatch tests** (lightweight): fake `Site`, fake
-  `Fetcher`, fake archive Inspection. For each mode, assert the
-  task list contains exactly the expected work for a manga whose
-  chapter list and archive state are configured to exercise the
-  matrix (some new chapters, some existing chapters with comments,
-  some existing chapters without).
+- **Mode dispatch tests** (lightweight, target `pipeline.Plan`):
+  fake `Site`, fake archive `Inspection`. Enumerate every matrix
+  cell explicitly, both positive and negative:
+
+  | Mode | Chapter state | Expected |
+  |---|---|---|
+  | `sync-comments` | in archive, no comments | render task |
+  | `sync-comments` | in archive, has comments | no task |
+  | `sync-comments` | not in archive | no task |
+  | `resume` | in archive, no comments | no task (no backfill) |
+  | `resume` | in archive, has comments | no task |
+  | `resume` | not in archive | download + render |
+  | `sync-manga` | in archive, no comments | render task |
+  | `sync-manga` | in archive, has comments | no task |
+  | `sync-manga` | not in archive | download + render |
+
+- **Width-stability tests** (target `layout` + `archive.InferredWidth`):
+  - Width-before-filter: pass `--from 100 --to 110` against a
+    500-chapter list; assert the produced folder names match what
+    `Folder("",num,4)` would emit on the full list.
+  - Mid-life growth: simulate an archive containing
+    `chap-0001/.../chap-9999/`; source list now has 10,000
+    chapters. Assert the effective width is 4 (the archive's
+    inferred width wins), so existing keys still match.
+  - Fresh-bootstrap: empty archive + 10,500-chapter source list ⇒
+    width 5.
+  - `InferredWidth` on an archive with mixed-width entries (from
+    historical bugs): returns the maximum and logs a warning.
+- **`.ok`-marker exclusion test** (target `archive.StageAndRename`):
+  scratch dir contains two chapter subdirs — one with `.ok`, one
+  without. Stage and assert: archive contains the first chapter's
+  files, the second chapter's files are not present, and `.ok`
+  itself never lands in the archive.
+- **File lock test**: spin up two concurrent `pipeline.Run`
+  invocations against the same manga; assert the second fails fast
+  with a "another downloader is running" error and the first
+  completes successfully.
+
+## Dependencies / version pins
+
+- `github.com/go-text/typesetting` — text shaping. Pin to a recent
+  tagged release; minimum `v0.2.0`.
+- `github.com/rivo/uniseg` — grapheme-cluster segmentation. Minimum
+  `v0.4.4` for stable cluster behaviour.
+- `github.com/gofrs/flock` (or `golang.org/x/sys/unix` direct) —
+  inter-process file lock for the pipeline guard.
+- **Twemoji asset edition: 15.1.** Vendored under
+  `internal/comments/assets/twemoji/` from the upstream
+  `twitter/twemoji` repo at the 15.1 tag. Codepoint coverage and
+  ZWJ-sequence filename convention are pinned to that release.
+  Updates require a deliberate vendoring step.
 
 ## Open / deferred decisions
 
-- **Twemoji bundle size.** Full set is ~4 MB embedded. Acceptable
-  per the project's single-binary philosophy.
+- **Twemoji bundle size.** Full set at 15.1 is ~4 MB embedded.
+  Acceptable per the project's single-binary philosophy.
 - **Hi-DPI rendering.** Output is 1× for now. Trivial to bump to 2×
   later.
 - **No-comments PNG.** Chapters with zero comments get no PNG, so
