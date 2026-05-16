@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPost_SendsFormAndCookieAndReferer(t *testing.T) {
@@ -92,5 +93,76 @@ func TestPost_403IsCloudflareExpiry(t *testing.T) {
 	_, err = f.Post(context.Background(), Request{URL: srv.URL}, url.Values{})
 	if !errors.Is(err, ErrCloudflareExpired) {
 		t.Fatalf("err = %v, want ErrCloudflareExpired", err)
+	}
+}
+
+// TestGet_RetriesOnClientTimeout proves that a per-attempt timeout
+// (h.client.Timeout firing) is retried, not surfaced immediately.
+// The test server sleeps long enough to trip a tiny client timeout
+// on the first attempt, then responds promptly on subsequent ones.
+func TestGet_RetriesOnClientTimeout(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			// Block long enough to trip the client timeout below.
+			time.Sleep(100 * time.Millisecond)
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	srvHost, _ := url.Parse(srv.URL)
+	f, err := New(
+		&CookieFile{UserAgent: "ua", Cookies: []CookieRecord{{Name: "x", Value: "y", Domain: srvHost.Hostname()}}},
+		Options{Timeout: 25 * time.Millisecond, MinDelay: time.Millisecond, MaxDelay: time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := f.Get(context.Background(), Request{URL: srv.URL})
+	if err != nil {
+		t.Fatalf("Get: %v (calls=%d)", err, calls)
+	}
+	if string(resp.Body) != "ok" {
+		t.Fatalf("body = %q, want %q", string(resp.Body), "ok")
+	}
+	if calls < 2 {
+		t.Fatalf("server saw %d call(s); expected at least 2 (retry must fire)", calls)
+	}
+}
+
+// TestGet_DoesNotRetryCallerCancel asserts that a *caller* cancelling
+// the context shortcuts the retry loop — we don't want to keep
+// hammering on something the parent told us to drop.
+func TestGet_DoesNotRetryCallerCancel(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		// Sleep so the caller has time to cancel mid-request.
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	srvHost, _ := url.Parse(srv.URL)
+	f, err := New(
+		&CookieFile{UserAgent: "ua", Cookies: []CookieRecord{{Name: "x", Value: "y", Domain: srvHost.Hostname()}}},
+		Options{Timeout: time.Second, MinDelay: time.Millisecond, MaxDelay: time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	_, err = f.Get(ctx, Request{URL: srv.URL})
+	if err == nil {
+		t.Fatal("expected error from cancelled ctx, got nil")
+	}
+	if calls > 1 {
+		t.Fatalf("server saw %d call(s); expected 1 (no retry after caller cancel)", calls)
 	}
 }

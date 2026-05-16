@@ -44,7 +44,11 @@ func (o Options) withDefaults() Options {
 		o.MaxDelay = 500 * time.Millisecond
 	}
 	if o.Timeout == 0 {
-		o.Timeout = 30 * time.Second
+		// 90s: image downloads on this source's CDN routinely take
+		// 30-60s for the larger pages; a 30s budget was tight enough
+		// to fail real syncs. The pipeline retries on timeout (see
+		// shouldRetry), so the 90s cap is per-attempt, not per-image.
+		o.Timeout = 90 * time.Second
 	}
 	return o
 }
@@ -72,9 +76,9 @@ func New(cf *CookieFile, opts Options) (*HTTPFetcher, error) {
 // cf_clearance.
 var ErrCloudflareExpired = errors.New("cloudflare cookie likely expired — refresh cf_clearance and re-run with --resume")
 
-// Get implements Fetcher with retries on 429/5xx and dial errors.
-// Successful 200 responses include a small post-request jitter to
-// avoid hammering the host.
+// Get implements Fetcher with retries on 429/5xx, dial errors, and
+// per-attempt timeouts. Successful 200 responses include a small
+// post-request jitter to avoid hammering the host.
 func (h *HTTPFetcher) Get(ctx context.Context, req Request) (*Response, error) {
 	var lastErr error
 	for attempt := 1; attempt <= h.maxAttempts; attempt++ {
@@ -84,7 +88,7 @@ func (h *HTTPFetcher) Get(ctx context.Context, req Request) (*Response, error) {
 			return resp, nil
 		}
 		lastErr = err
-		if !shouldRetry(err) || attempt == h.maxAttempts {
+		if !shouldRetry(ctx, err) || attempt == h.maxAttempts {
 			break
 		}
 		// Exponential backoff: 500ms, 1s, 2s …
@@ -144,7 +148,7 @@ func (h *HTTPFetcher) Post(ctx context.Context, req Request, form url.Values) (*
 			return resp, nil
 		}
 		lastErr = err
-		if !shouldRetry(err) || attempt == h.maxAttempts {
+		if !shouldRetry(ctx, err) || attempt == h.maxAttempts {
 			break
 		}
 		// Exponential backoff: 500ms, 1s, 2s … mirrors Get.
@@ -212,16 +216,29 @@ func (e *httpStatusError) Error() string {
 	return fmt.Sprintf("retryable http status %d", e.Status)
 }
 
-func shouldRetry(err error) bool {
+// shouldRetry distinguishes caller-driven cancellations (don't retry)
+// from our own h.client.Timeout firing (do retry). Both surface as
+// context.DeadlineExceeded; the difference is whether the *caller's*
+// context is still alive at the time of the error.
+func shouldRetry(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, ErrCloudflareExpired) {
 		return false
 	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		// Caller's context fired → propagate, don't retry.
+		// Otherwise it was our per-request Timeout → retry.
+		return ctx.Err() == nil
+	}
 	var se *httpStatusError
 	if errors.As(err, &se) {
 		return true
 	}
-	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+	// Network / dial / TLS / read errors fall through to retryable.
+	return true
 }
