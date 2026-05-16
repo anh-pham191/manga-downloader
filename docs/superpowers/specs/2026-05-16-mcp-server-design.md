@@ -204,7 +204,7 @@ type SyncOutput struct {
 |---|---|---|---|
 | `update_cookie` | `value: string`, `user_agent?: string`, `domain?: string` | `{ ok: true, cookie_path: string }` | Writes via temp+rename. Rejects empty values. |
 | `get_cookie_status` | `{}` | `{ cookie_path, has_clearance, mtime, last8 }` | Never returns the full token. `last8` is the trailing 8 chars for confirmation. |
-| `list_manga` | `{}` | `[{ name, size_bytes, chapters, comments_attached, missing_comments }]` | Reads `*.cbz` from `--root` and runs `archive.Inspect` on each. |
+| `list_manga` | `{}` | `{ items: [{ name, size_bytes, chapters, comments_attached, missing_comments, archive_width? }] }` | Reads `*.cbz` from `--root` and runs `archive.Inspect` on each. |
 | `inspect_manga` | `{ name }` | Same shape as one `list_manga` entry plus `archive_width`. | Fails with `NO_ARCHIVE` if missing. |
 | `sync_manga` | `SyncInput` | `SyncOutput` | Calls pipeline `Run` with mode `SyncManga`. |
 | `resume` | `SyncInput` | `SyncOutput` | Mode `Resume`. |
