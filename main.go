@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/anhpham/downloader/internal/fetcher"
+	"github.com/anhpham/downloader/internal/mcp"
 	"github.com/anhpham/downloader/internal/pipeline"
 	sourcesite "github.com/anhpham/downloader/internal/site/source"
 )
@@ -21,6 +23,13 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
+	}
+	if os.Args[1] == "mcp" {
+		if err := runMCP(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 	mode, ok := parseMode(os.Args[1])
 	if !ok {
@@ -123,6 +132,7 @@ func usage() {
   downloader sync-manga    [flags] <manga-url>   download new chapters + comments + backfill missing comments
   downloader resume        [flags] <manga-url>   download new chapters + comments (no backfill)
   downloader sync-comments [flags] <manga-url>   backfill comments on existing archive (no new chapters)
+  downloader mcp           [flags]               run local MCP server over stdio for Claude Desktop
 
 flags:
   --out string           root directory (default: ~/Documents/Manga)
@@ -132,6 +142,31 @@ flags:
   --to int               last chapter
   --cookies string       path to cookie JSON
   --verbose              per-chapter progress`)
+}
+
+func runMCP(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+	root := fs.String("out", defaultOutDir(), "manga root directory")
+	cookies := fs.String("cookies", defaultCookiesPath(), "path to cookies.json")
+	verbose := fs.Bool("verbose", false, "verbose logging to stderr")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var logger *log.Logger
+	if *verbose {
+		logger = log.New(os.Stderr, "mcp: ", log.LstdFlags)
+	} else {
+		logger = log.New(io.Discard, "", 0)
+	}
+	srv, err := mcp.New(mcp.Opts{
+		Root:        *root,
+		CookiesPath: *cookies,
+		Logger:      logger,
+	})
+	if err != nil {
+		return err
+	}
+	return srv.Serve(context.Background())
 }
 
 func defaultOutDir() string {
