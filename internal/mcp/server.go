@@ -34,6 +34,7 @@ func New(opts Opts) (*Server, error) {
 		Name:    "manga-downloader",
 		Version: "0.1.0",
 	}, nil)
+	s.register()
 	return s, nil
 }
 
