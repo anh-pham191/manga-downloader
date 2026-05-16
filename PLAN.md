@@ -1,5 +1,14 @@
 # Manga Downloader — Implementation Plan
 
+> **Superseded by the comment-pages design at
+> `docs/superpowers/specs/2026-05-16-comment-pages-design.md` and
+> the implementation plan at
+> `docs/superpowers/plans/2026-05-16-manga-comments-sync.md`.**
+> The original "chapter folder + .done + package-cbz.sh" design
+> below is kept for historical context only. The shipping tool
+> writes `.cbz` archives directly and uses three subcommands
+> (`sync-manga` / `resume` / `sync-comments`).
+
 A personal macOS CLI, written in Go, that mirrors a manga from a
 configured source site (and, by virtue of its design, future sites)
 to local disk for offline reading.

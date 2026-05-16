@@ -92,33 +92,48 @@ exits with code 2.
 
 ## Usage
 
+Three subcommands, all operating against `<--out>/<name>.cbz`:
+
 ```sh
-bin/downloader "<manga-url>"
+bin/downloader sync-manga    [flags] <manga-url>   # new chapters + comments
+                                                   # AND backfill missing comments
+bin/downloader resume        [flags] <manga-url>   # new chapters + comments only
+bin/downloader sync-comments [flags] <manga-url>   # backfill comments only (no new chapters)
 ```
 
-Defaults:
+The archive is the only persistent state — no per-chapter folders or
+`.done` markers stay on disk. A scratch directory at
+`<out>/.<name>.scratch/` is used during a run and deleted on clean
+exit; partial work survives a kill via per-chapter `.ok` markers.
+
+Concurrent runs against the same archive are prevented by a file
+lock at `<out>/<name>.cbz.lock`.
+
+Flags:
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--out` | `~/Documents/Manga` | Root for all manga folders |
-| `--name` | URL slug | Pass `--name "Friendly Title"` for a nicer folder |
+| `--out` | `~/Documents/Manga` | Root for all `<name>.cbz` archives |
+| `--name` | URL slug | Pass `--name "Friendly Title"` to control the filename |
 | `--concurrency` | `4` | Chapters in flight; drop to 2 if you get rate-limited |
-| `--from N` / `--to M` | none | Inclusive range filter |
-| `--resume` | off | Skip chapters whose folder already contains `.done` |
-| `--cookies` | platform default | Path to the JSON file above |
+| `--from N` / `--to M` | none | Inclusive range filter (applies to image download in `resume` / `sync-manga`; ignored by `sync-comments`) |
+| `--cookies` | platform default | Path to the cookie JSON file |
 | `--verbose` | off | Per-chapter progress to stderr |
 
 Common recipes:
 
 ```sh
-# Download just the first 5 chapters into a custom folder
-bin/downloader --to 5 --name "Friendly Title" "<manga-url>"
+# Fresh archive: download every chapter + comments
+bin/downloader sync-manga --name "Friendly Title" "<manga-url>"
 
-# Resume after a Cloudflare expiry — already-done chapters are instant
-bin/downloader --resume "<manga-url>"
+# Resume after a Cloudflare expiry — already-archived chapters are skipped
+bin/downloader resume "<manga-url>"
+
+# Backfill comment pages onto an existing archive (no new chapters)
+bin/downloader sync-comments "<manga-url>"
 
 # Be polite on a small laptop / flaky connection
-bin/downloader --concurrency 2 --verbose "<manga-url>"
+bin/downloader sync-manga --concurrency 2 --verbose "<manga-url>"
 ```
 
 Exit codes:
