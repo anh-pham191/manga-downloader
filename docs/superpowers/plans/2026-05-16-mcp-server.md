@@ -409,8 +409,8 @@ func TestUpdateClearance_PreservesOtherFields(t *testing.T) {
 	seed := fetcher.CookieFile{
 		UserAgent: "Mozilla/5.0 (existing)",
 		Cookies: []fetcher.CookieRecord{
-			{Name: "cf_clearance", Value: "OLD", Domain: ".truyenqqko.com"},
-			{Name: "other", Value: "keep", Domain: ".truyenqqko.com"},
+			{Name: "cf_clearance", Value: "OLD", Domain: ".<source-site>"},
+			{Name: "other", Value: "keep", Domain: ".<source-site>"},
 		},
 	}
 	mustWriteJSON(t, path, seed)
@@ -548,7 +548,7 @@ import (
 	"github.com/anhpham/downloader/internal/fetcher"
 )
 
-const defaultCookieDomain = ".truyenqqko.com"
+const defaultCookieDomain = ".<source-site>"
 
 // CookieStatusResult is what the get_cookie_status tool returns.
 type CookieStatusResult struct {
@@ -843,7 +843,7 @@ func (s *Server) register() {
 type UpdateCookieInput struct {
 	Value     string `json:"value" jsonschema:"required,description=The cf_clearance value the user copied from their browser DevTools"`
 	UserAgent string `json:"user_agent,omitempty" jsonschema:"description=Optional updated User-Agent (paste the value of navigator.userAgent)"`
-	Domain    string `json:"domain,omitempty" jsonschema:"description=Optional cookie domain (defaults to the existing entry's domain or .truyenqqko.com)"`
+	Domain    string `json:"domain,omitempty" jsonschema:"description=Optional cookie domain (defaults to the existing entry's domain or .<source-site>)"`
 }
 
 type UpdateCookieOutput struct {
@@ -1521,7 +1521,7 @@ func TestRunSync_DerivesNameFromURL(t *testing.T) {
 		runFn:    func(ctx context.Context, _ pipeline.Opts) error { return nil },
 	}
 	out, err := exec.Run(context.Background(), pipeline.SyncManga, SyncInput{
-		URL: "https://truyenqqko.com/truyen-tranh/gintama-216",
+		URL: "https://<source-site>/truyen-tranh/gintama-216",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1733,7 +1733,7 @@ func TestTool_SyncCFExpiredFlow(t *testing.T) {
 
 	res, err := client.CallTool(context.Background(), &sdk.CallToolParams{
 		Name:      "resume",
-		Arguments: map[string]any{"url": "https://truyenqqko.com/truyen-tranh/x-1", "name": "X"},
+		Arguments: map[string]any{"url": "https://<source-site>/truyen-tranh/x-1", "name": "X"},
 	})
 	if err != nil {
 		t.Fatal(err)
