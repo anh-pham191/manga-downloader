@@ -123,7 +123,7 @@ Hidden inputs on the chapter page give us the IDs for pagination:
 Page 2 (and beyond) loads via:
 
 ```
-POST https://truyenqqko.com/frontend/comment/list
+POST https://<source-site>/frontend/comment/list
 Content-Type: application/x-www-form-urlencoded
 
 book_id=<book_id>&parent_id=0&page=2&episode_id=<episode_id>&team_id=0

@@ -264,8 +264,8 @@ milestone has a clear "done when" so we can demo it in isolation.
 - **No edits to tests** once approved, except to add cases.
 - **Pause before destructive ops** — e.g. wiping a partially populated
   `downloads/` tree — show the plan and wait for "yes".
-- **Stay inside `/Users/anhpham/Documents/Projects/script/downloader`**
-  unless explicitly told otherwise.
+- **Stay inside the project directory** unless explicitly told
+  otherwise.
 
 ## 9. Open Questions
 
