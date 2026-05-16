@@ -219,7 +219,9 @@ type SyncOutput struct {
 4. Tool wrapper maps to `ToolError{Code: CF_TOKEN_EXPIRED, Message:
    "cf_clearance is invalid or expired. Ask the user for a fresh
    value (DevTools → Application → Cookies → cf_clearance), then
-   call update_cookie before retrying."}`.
+   call update_cookie before retrying."}`. The code lands in BOTH the
+   text body and `CallToolResult.Meta["error_code"]`, so Claude can
+   branch deterministically without string-matching the message.
 5. Claude sees the error, prompts the user in chat for a token.
 6. User pastes token.
 7. Claude calls `update_cookie { value: "<pasted>" }`.
@@ -241,6 +243,15 @@ hard way.
 - `cancel_run` calls the active `CancelFunc`. The pipeline already
   honours `ctx.Done()` between chapters; partial work survives via
   the existing `.ok` markers.
+
+**Why a server-level mutex on top of the per-archive flock:** The
+flock alone is enough for correctness — it prevents two writers from
+clobbering the same `.cbz`. The server-level mutex is a UX guarantee:
+two parallel syncs against *different* archives would interleave
+log lines on stderr, saturate the target site with concurrent
+requests, and make `cancel_run` ambiguous. v2 may relax this to
+"one in-flight sync per archive" if the user wants to download two
+mangas at once.
 
 ### Cookie-file write
 
