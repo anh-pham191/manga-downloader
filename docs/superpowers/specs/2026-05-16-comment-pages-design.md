@@ -1,6 +1,6 @@
-# Comment Pages — Design Spec
+# Manga + Comments Sync — Design Spec
 
-**Date:** 2026-05-16
+**Date:** 2026-05-16 (v4 — CBZ-only redesign)
 **Branch:** `feature/comment-pages`
 **Status:** Design — pending implementation
 
@@ -8,106 +8,84 @@
 
 ## Goal
 
-After each downloaded chapter, append a rendered PNG of that chapter's
-reader comments as the last page of the chapter folder, so it shows up
-as the final page when the manga is read via CBZ in any comic reader.
-The same flow doubles as a backfill: re-running `--resume` on a manga
-that finished before this feature shipped fills in comment pages for
-every existing chapter.
+Make the downloader operate against `.cbz` archives as its single
+source of truth. Add reader-comment pages as the final page of each
+chapter. Three explicit modes describe what to do:
+
+| Mode | Download images for NEW chapters | Render comments for NEW chapters | Backfill comments on chapters ALREADY in CBZ |
+|---|---|---|---|
+| `sync-comments` | ❌ | ❌ | ✅ |
+| `resume` | ✅ | ✅ | ❌ |
+| `sync-manga` | ✅ | ✅ | ✅ |
+
+"New chapter" = present in the source site's chapter list but not
+yet present in the `.cbz`.
+
+This subsumes and replaces the previous folder-based layout (one
+chapter per folder, `.done` sentinel, `package-cbz.sh` post-step).
+Chapter folders only exist as ephemeral scratch during a run.
 
 ## Non-goals
 
-- Capturing every comment ever posted. We capture the first two pages
-  only.
-- Refreshing comments over time. Each chapter's comments are scraped
-  once; subsequent runs skip chapters that already have a
-  `.comments.done` sentinel.
+- Preserving the old folder-on-disk workflow as a first-class path.
+  Existing user folders (if any survive on disk) are bundled once
+  and then discarded; the long-term state is the `.cbz`.
+- Re-downloading existing chapters in `sync-manga`. The mode does
+  *backfill* of missing comments and *forward* of new chapters; it
+  does not re-fetch already-archived images. A "force re-download"
+  mode is explicitly out of scope.
+- Capturing every comment ever posted. We capture the first two
+  pages of comments per chapter.
 - Avatar rendering.
-- Per-reply threading. The first two pages of the comment list endpoint
-  return parent comments; replies are not captured.
+- Per-reply threading.
+- Refreshing comments over time. Once a chapter has a
+  `zzz-comments.png` inside the `.cbz`, its comments are frozen.
 
 ## User-visible behaviour
 
-There are two backfill scenarios, both driven by the same `downloader`
-binary:
-
-**A. Chapter folders still on disk** (the normal `--resume` path):
-`./bin/downloader <url>` (with or without `--resume`) gains a new step
-after a chapter's images are saved:
-
-1. If `.comments.done` already exists in the chapter folder → skip.
-2. Otherwise: scrape page 1 of comments (already in the chapter HTML)
-   and page 2 (one extra POST). If ≥1 comment, render
-   `zzz-comments.png`. Always write `.comments.done` afterward, even
-   when there are zero comments.
-
-**B. CBZ-only, chapter folders deleted** (the real state of
-`~/Documents/Manga/` today — every entry is a `.cbz`, the source
-folders are gone): a new mode injects comment pages directly into
-the existing archive without a full unzip/rezip.
+Three subcommands on the existing binary:
 
 ```
-./bin/downloader --comments-only <url>
+./bin/downloader sync-manga    [flags] <manga-url>
+./bin/downloader resume        [flags] <manga-url>
+./bin/downloader sync-comments [flags] <manga-url>
 ```
 
-This mode:
+Shared flags (carried over from today's CLI):
 
-1. Re-fetches the manga's chapter list from `<url>` so we have every
-   chapter's URL (the on-disk `.chapters.json` was excluded from the
-   CBZ, so it's gone).
-2. Reads the existing `<name>.cbz` central directory via Go stdlib
-   `archive/zip` (no shell-out) to learn which `chap-NNNN[-K]/`
-   directories the archive contains.
-3. Builds the folder-name → chapter-URL map by calling the **exact
-   same** `chapterFolder` / `folderWidth` helpers the downloader
-   uses (see "Folder-naming correctness" below). This is the join
-   key.
-4. Collects all chapters whose `chap-NNNN[-K]/zzz-comments.png` is
-   *missing* from the archive, scrapes each, renders each PNG to a
-   per-manga scratch directory.
-5. **Stages all updates in one tmp archive then atomically renames**
-   (see "Safe archive update" below). Does NOT do per-chapter
-   `zip -u` against the live `.cbz`.
+| Flag | Default | Notes |
+|---|---|---|
+| `--out` | `~/Documents/Manga` | Root folder. Each manga is `<root>/<name>.cbz`. |
+| `--name` | URL slug | Pass `--name "Friendly Title"` to control the archive filename. |
+| `--concurrency` | `4` | Chapters in flight. |
+| `--from N` / `--to M` | none | Inclusive chapter-number range filter. Applies to image download in `resume` / `sync-manga`; ignored by `sync-comments` (which works on what's already in the archive). |
+| `--cookies` | platform default | Same `cf_clearance` JSON as today. |
+| `--verbose` | off | Per-chapter progress to stderr. |
 
-The presence of `chap-NNNN[-K]/zzz-comments.png` inside the archive
-IS the sentinel — no separate `.comments.done` file is needed here
-(and can't be, since the archive isn't tracked by per-file
-sentinels).
+If `<root>/<name>.cbz` does not exist:
 
-Both paths share the same scraper and renderer; only the persistence
-layer differs (filesystem sentinel + folder vs. archive-as-state).
+- `sync-manga` → behaves like a fresh full download (images +
+  comments for every chapter in the source list).
+- `resume` → also behaves like a fresh full download (nothing
+  already in archive ⇒ everything is "new").
+- `sync-comments` → no-op + warning ("no archive to backfill at
+  `<path>`; run `sync-manga` first"); exit 0.
 
-**Which scenario runs when both folder *and* `.cbz` exist:**
-scenario A (the normal download/resume path) operates on chapter
-folders only and ignores any sibling `.cbz`. After scenario A
-finishes, re-run `package-cbz.sh` to bring the archive up to date.
-Scenario B (`--comments-only`) operates on `.cbz` only and does not
-touch chapter folders even if they exist. The two never overlap.
+If `<root>/<name>.cbz` exists, modes behave per the matrix above.
 
-**Comment ordering inside the rendered PNG:** page 1's comments
-first (top of the canvas), then page 2's, preserving the order the
-site returns them (which is approximately most-recent-first for
-page 1, then continuing). No reordering or de-duplication beyond
-"page 2 fetched separately from page 1".
+The CBZ filename uses the existing slug/`--name` rules — there is
+exactly one archive per manga.
 
-`package-cbz.sh` is updated to exclude `.comments.done` from new
-archives so the sentinel never leaks in. The `zzz-` prefix on the
-rendered PNG makes it sort last alphabetically, so any comic reader
-places it at the end of the chapter.
+## Source data — chapters and comments
 
-Flags:
+The source-site adapter (`internal/site/source`) already returns a
+sorted, deduplicated `[]site.Chapter{Number, URL}` for a manga URL.
+That existing call is the canonical list of chapters available
+upstream. No change needed there.
 
-- `--comments` (default `true`) — toggles the comments step on the
-  normal download/resume path (scenario A).
-- `--comments-only` — runs the scenario-B injector and exits.
-  Implies `--resume`-style "skip already-done" behaviour, but
-  driven by the archive contents rather than filesystem sentinels.
-
-## Source data
-
-The site (`truyenqqko.com`) renders the first page of comments
-server-side inside `<div id="comment_list">`. Each parent comment is
-one `<article class="info-comment child_<ID> parent_0 ...">` element
+The site renders the first page of comments server-side inside
+`<div id="comment_list">`. Each parent comment is one
+`<article class="info-comment child_<ID> parent_0 ...">` element
 containing:
 
 - `<strong class="level name_<N>">` — username
@@ -117,8 +95,7 @@ containing:
   emote `<img class="lazy-image" alt="emo">` tags that we strip.
 - `<span class="total-like-comment">` — like count
 
-Hidden inputs on the chapter page give us the IDs we need for
-pagination:
+Hidden inputs on the chapter page give us the IDs for pagination:
 
 ```html
 <input id="book_id" value="13680" />
@@ -135,70 +112,122 @@ Content-Type: application/x-www-form-urlencoded
 book_id=<book_id>&parent_id=0&page=2&episode_id=<episode_id>&team_id=0
 ```
 
-The response is an HTML fragment containing the same
-`<article class="info-comment ...">` blocks the chapter page renders
-for page 1, suitable to parse with the same selectors.
+The response is an HTML fragment of the same `<article>` blocks the
+chapter page renders for page 1.
+
+## Archive layout (state model)
+
+Inside `<name>.cbz`:
+
+```
+chap-NNNN[-K]/
+├── 001.jpg … MMM.jpg     // chapter images
+└── zzz-comments.png      // optional: rendered comments page
+```
+
+- `chap-NNNN[-K]/` is the existing folder-name format
+  (`internal/downloader/downloader.go:chapterFolder` — dynamic
+  zero-padding, `-K` suffix for fractional chapters).
+- Presence of *any* image in `chap-NNNN/` ⇒ chapter images are
+  considered "in archive."
+- Presence of `chap-NNNN/zzz-comments.png` ⇒ comments are in
+  archive.
+- The `zzz-` prefix sorts last alphabetically, so comic readers
+  show it as the final page of the chapter.
+
+**No `.done` / `.comments.done` sentinels.** The archive contents
+are the source of truth. This is intentional: the old sentinels
+were tied to chapter folders on disk, which no longer exist.
 
 ## Architecture
 
-A new `internal/comments/` package, plus a small reorganisation of
-the existing downloader to share its folder-naming logic:
+```
+internal/
+├── layout/                    // NEW — shared chapter-folder naming
+│   ├── folder.go              // Width([]site.Chapter) int;
+│   │                           // Folder(root, number, width) string
+│   └── folder_test.go
+├── fetcher/
+│   └── …                       // Existing GET, plus new Post (below).
+├── site/source/
+│   └── …                       // Unchanged.
+├── comments/
+│   ├── scraper.go              // page-1 from chapter HTML +
+│   │                           // page-2 POST → []Comment
+│   ├── scraper_test.go
+│   ├── renderer.go             // []Comment → PNG (pure Go)
+│   ├── renderer_test.go
+│   ├── testdata/
+│   │   ├── chapter-with-comments.html
+│   │   ├── page2-fragment.html
+│   │   └── shaping-fixture.png // ZWJ + skin-tone + NFD Vietnamese
+│   └── assets/
+│       ├── NotoSans-Regular.ttf
+│       ├── NotoSans-Bold.ttf
+│       └── twemoji/<seq>.png   // 1f468-200d-1f469-200d-1f467.png
+├── archive/                   // NEW — read .cbz + safe stage-and-rename
+│   ├── reader.go               // ListChapterDirs, HasComments,
+│   │                           // CopyRawTo (CreateRaw + OpenRaw)
+│   ├── writer.go               // StageAndRename
+│   └── archive_test.go
+└── downloader/
+    └── …                       // Refactored to feed scratch dir
+                                // + delegate bundling to archive/.
+```
 
-- **`internal/layout/`** (new) — extracted from
-  `internal/downloader/downloader.go`. Holds exported helpers with
-  signatures that match the existing implementations exactly, so the
-  extraction is a straight move (not a redesign):
+### Single per-run pipeline
 
-  ```go
-  // Width returns the zero-padding width wide enough for the largest
-  // chapter number in the list, with a floor of 4.
-  func Width(chapters []site.Chapter) int
+```
+1. List source chapters:
+       chapters := site.ListChapters(ctx, mangaURL)
+       width := layout.Width(chapters)
 
-  // Folder turns a published number like "227.5" into a
-  // filesystem-friendly, lexicographically-sortable name like
-  // <root>/chap-0227-5.
-  func Folder(root, number string, width int) string
-  ```
+2. Inspect existing archive (if any):
+       have, haveComments := archive.Inspect(<name>.cbz)
+       // have: set of "chap-NNNN[-K]" folder names with ≥1 image entry.
+       // haveComments: subset of `have` that also has zzz-comments.png.
 
-  The downloader's existing `folderWidth` / `chapterFolder` become
-  one-line delegates. The archive injector calls `layout.Width` on
-  the freshly fetched `[]site.Chapter` and `layout.Folder("", num,
-  w)` per chapter to build the join key.
-- **`internal/comments/scraper.go`** — given a chapter URL + a
-  `fetcher.Fetcher`, returns `[]Comment` for the first two pages.
-  Reuses the existing fetcher (cookies, retries, jitter, Cloudflare
-  403 handling), but requires a new POST method on the fetcher (see
-  "Fetcher changes" below).
-- **`internal/comments/renderer.go`** — given `[]Comment` and an
-  output `io.Writer`, writes a PNG. See "Rendering details" for the
-  Vietnamese + emoji shaping story and the de-risk gate.
-- **`internal/comments/folder_sync.go`** — scenario A: scrape →
-  render → write into `chap-NNNN[-K]/zzz-comments.png` +
-  `.comments.done` sentinel.
-- **`internal/comments/archive_sync.go`** — scenario B: list
-  existing `.cbz` via stdlib `archive/zip`, re-fetch chapter list,
-  scrape + render per missing chapter, stage all PNGs into one
-  rebuilt tmp archive, verify with `unzip -t`, atomic rename over
-  the original.
-- **`internal/comments/assets/`** — embedded font (Noto Sans regular
-  + bold) and embedded Twemoji 72×72 PNG set (named by ZWJ-joined
-  codepoint sequence, e.g. `1f468-200d-1f469-200d-1f467.png`), both
-  via `//go:embed`.
+3. Decide work per mode:
+       for each c in chapters:
+           folder := layout.Folder("", c.Number, width)
+           in := have.Contains(folder)
+           switch mode:
+               sync-comments:
+                   if in && !haveComments.Contains(folder):
+                       tasks += RenderComments(c)
+               resume:
+                   if !in:
+                       tasks += DownloadImages(c) + RenderComments(c)
+               sync-manga:
+                   if !in:
+                       tasks += DownloadImages(c) + RenderComments(c)
+                   else if !haveComments.Contains(folder):
+                       tasks += RenderComments(c)
 
-`internal/downloader/` gains one hook in its per-chapter routine,
-called after `.done` is written (the scenario-A entry point).
+4. Execute tasks (worker pool, default concurrency 4).
+   All outputs land in a scratch directory:
+       <scratchRoot>/<folder>/001.jpg, 002.jpg, …
+       <scratchRoot>/<folder>/zzz-comments.png
 
-`main.go` gains the `--comments-only` flag dispatch that calls
-`comments.SyncArchive` instead of running the normal download flow.
+5. Stage and rename:
+       archive.StageAndRename(<name>.cbz, scratchRoot)
+       // copies existing entries via CreateRaw + OpenRaw,
+       // appends every file under scratchRoot,
+       // verifies via unzip -t, then os.Rename.
+
+6. Delete scratchRoot.
+```
+
+If the archive does not exist before step 5, `StageAndRename` writes
+a fresh `<name>.cbz` directly (no source entries to copy forward).
 
 ### Fetcher changes
 
 `internal/fetcher/fetcher.go` currently exposes a GET-only interface
 shaped around a `Request{URL, Referer}` / `*Response{Body,
-ContentType}` pair. The page-2 comments endpoint is
-`POST application/x-www-form-urlencoded`, so the interface gains a
-sibling that **mirrors** the existing shape rather than introducing
-a parallel `io.ReadCloser` style:
+ContentType}` pair. The page-2 comments endpoint is `POST
+application/x-www-form-urlencoded`, so the interface gains a sibling
+that mirrors the existing shape:
 
 ```go
 type Fetcher interface {
@@ -208,141 +237,83 @@ type Fetcher interface {
 ```
 
 `Request.Referer` is reused — the AJAX endpoint's hot-link guard
-will likely reject requests with no Referer (the chapter page URL is
-the natural choice). The HTTP implementation mirrors the existing
-`Get` (cookie jar, User-Agent, 3× retries on 429/5xx/dial,
-200–500 ms jitter, and the `cf_clearance`-expiry 403 handling). The
-test fake gains the matching method.
+will likely reject requests with no Referer. The HTTP implementation
+mirrors the existing `Get` (cookie jar, User-Agent, 3× retries on
+429/5xx/dial, 200–500 ms jitter, `cf_clearance`-expiry 403
+handling). The test fake gains the matching method.
 
 **Pre-implementation spike:** before merging, verify with one curl
-call that `POST /frontend/comment/list` with `cf_clearance` cookie
-returns 200, not a Cloudflare challenge. If POST is challenged
-differently from GET, scenario B is blocked and we need to revisit.
+call that `POST /frontend/comment/list` with `cf_clearance` returns
+200, not a Cloudflare challenge. If POST is challenged differently
+from GET, the design needs revisiting.
 
-```
-internal/
-├── downloader/
-│   └── … (existing) + new call into comments.SyncFolder per chapter
-├── fetcher/
-│   └── … (existing) + new Post() method on the interface & impls
-├── layout/                   // NEW — shared chapter-folder naming
-│   ├── folder.go             // Folder(num, max) string; FolderWidth(max) int
-│   └── folder_test.go
-├── comments/
-│   ├── scraper.go
-│   ├── scraper_test.go
-│   ├── renderer.go
-│   ├── renderer_test.go
-│   ├── folder_sync.go        // scenario A: filesystem + sentinel
-│   ├── folder_sync_test.go
-│   ├── archive_sync.go       // scenario B: stage-and-rename CBZ
-│   ├── archive_sync_test.go
-│   ├── testdata/
-│   │   ├── chapter-with-comments.html
-│   │   ├── page2-fragment.html
-│   │   ├── sample.cbz        // small fixture for archive tests
-│   │   ├── golden-render.png
-│   │   └── shaping-fixture.png  // ZWJ + skin-tone + NFD Vietnamese
-│   └── assets/
-│       ├── NotoSans-Regular.ttf
-│       ├── NotoSans-Bold.ttf
-│       └── twemoji/<seq>.png  // names like 1f468-200d-1f469-200d-1f467.png
+### Layout package
+
+Extracted from `internal/downloader/downloader.go` with signatures
+that match the existing implementations exactly — a straight move,
+not a redesign:
+
+```go
+// Width returns the zero-padding width wide enough for the largest
+// chapter number in the list, with a floor of 4.
+func Width(chapters []site.Chapter) int
+
+// Folder turns a published number like "227.5" into a
+// filesystem-friendly, lexicographically-sortable name like
+// <root>/chap-0227-5.
+func Folder(root, number string, width int) string
 ```
 
-### Data type
+The downloader's existing `folderWidth` / `chapterFolder` become
+one-line delegates. The archive injector and the comments renderer
+both call `layout.Folder("", num, w)` for join keys.
+
+### Comments package
 
 ```go
 type Comment struct {
     Name      string  // "sukuna"
-    Level     string  // "Giới Chủ" (the chip text); may be empty
-    Body      string  // plain text, emote <img> stripped
+    Level     string  // "Giới Chủ" — may be empty
+    Body      string  // plain text, emote <img> stripped, NFC-normalised
     LikeCount int
 }
+
+// Scrape fetches page 1 from the chapter HTML and page 2 from the
+// AJAX endpoint. Returns at most ~6 comments × 2 pages.
+func Scrape(ctx context.Context, chapterURL string, f fetcher.Fetcher) ([]Comment, error)
+
+// Render writes a PNG of the comment list to w.
+func Render(cs []Comment, w io.Writer) error
 ```
 
 No timestamp field — the site renders relative times client-side
-("3 ngày trước") via JS, so the timestamp isn't in the server HTML
-we scrape. Acceptable to omit.
+("3 ngày trước") so the timestamp is not in the server HTML.
 
-### Per-chapter file layout
+### Archive package
 
+```go
+type Inspection struct {
+    Have         map[string]bool // folder names with ≥1 image entry
+    HaveComments map[string]bool // subset that also has zzz-comments.png
+}
+
+func Inspect(cbzPath string) (Inspection, error)
+
+// StageAndRename atomically merges `scratchRoot/**` into cbzPath.
+// If cbzPath does not exist, a fresh archive is written from
+// scratch. Existing entries are preserved byte-for-byte via the
+// raw-copy mechanism (CreateRaw + OpenRaw — see "Safe archive
+// update"). The tmp file is created alongside cbzPath so os.Rename
+// is atomic.
+func StageAndRename(cbzPath, scratchRoot string) error
 ```
-chap-NNNN/
-├── 001.jpg … NNN.jpg     // existing
-├── .done                  // existing — images complete
-├── zzz-comments.png       // new — only if ≥1 comment
-└── .comments.done         // new — sentinel: comments synced
-```
-
-## Flow
-
-**Scenario A — folder + sentinel (normal download/resume):**
-
-```
-for each chapter the downloader processes:
-    download images (existing)
-    write .done (existing)
-    if --comments && !.comments.done:
-        comments, err := comments.Scrape(ctx, chapterURL, fetcher)
-        if err is cloudflareExpiry: surface and exit 1 (existing pattern)
-        if err is transient: log, leave .comments.done absent, continue
-        if len(comments) > 0:
-            render chap-NNNN/zzz-comments.png
-        write .comments.done
-```
-
-Backfill in this scenario is implicit: an old chapter with `.done`
-but no `.comments.done` triggers the same branch on the next
-`--resume`. Image download is skipped (existing `.done` check).
-
-**Scenario B — `--comments-only`, archive-only state:**
-
-```
-// site.ListChapters returns chapters sorted ascending by number
-// (verified in internal/site/source/site.go); the last element is
-// therefore the maximum.
-chapters, err := site.ListChapters(ctx, mangaURL, fetcher)
-maxNum := chapters[len(chapters)-1].Number
-foldersByURL := map[folder]url{}
-for _, c := range chapters:
-    foldersByURL[layout.Folder(c.Number, maxNum)] = c.URL
-
-zr, _ := zip.OpenReader(<name>.cbz)
-chapDirs := uniqueChapDirsFrom(zr)                 // "chap-0001", "chap-0032-5", ...
-have := chapDirsContainingCommentsPNG(zr)
-zr.Close()
-
-missing := chapDirs - have
-for each dir in missing:
-    url, ok := foldersByURL[dir]
-    if !ok:
-        log "no URL match for", dir, "skipping"; continue
-    comments, err := comments.Scrape(ctx, url, fetcher)
-    if err is cloudflareExpiry: surface and exit 1
-    if err is transient: log, skip this chapter (will retry next run)
-    if len(comments) == 0: continue
-    render PNG to scratch/<dir>/zzz-comments.png
-
-if no PNGs rendered:
-    return  // nothing to inject
-
-// Single staged update for the whole manga (see Safe archive update).
-buildTmpArchive(<name>.cbz.tmp, <name>.cbz, scratch/)
-verify: exec `unzip -t <name>.cbz.tmp` exit 0
-os.Rename(<name>.cbz.tmp, <name>.cbz)
-```
-
-The "no URL match" case can happen if the manga's chapter URLs have
-been renumbered. The folder-name match handles fractional chapters
-(`chap-0032-5`) directly because the join key is the folder name,
-not an integer.
 
 ## Rendering details
 
 - Canvas: 1000 px wide; height grows with content.
 - Header band (~80 px): "Bình Luận (M)" left-aligned, divider line
   below.
-- Per-comment block (~min 100 px, grows with body text):
+- Per-comment block:
   - Bold username (24 px) + grey level chip + 👍 like count right
   - Body text (20 px) word-wrapped to canvas width minus margins,
     line spacing 1.4
@@ -350,262 +321,230 @@ not an integer.
 - Background: white. Text: near-black (#222). Chip & meta text:
   grey (#888).
 
-### Text shaping is harder than "codepoint by codepoint"
+### Text shaping
 
-Two real complications that the v1 draft hand-waved:
+Two complications that "codepoint by codepoint" hides:
 
 1. **Vietnamese mark positioning.** Bare freetype +
    `golang.org/x/image/font` does not do OpenType mark positioning,
    so combining diacritics (`e` + U+0302 + U+0301 for `ế`) render as
-   stacked-wrong. The body text needs a real shaper. Plan to use
-   **`github.com/go-text/typesetting`** for shaping and
-   `golang.org/x/image/font/opentype` for glyph rasterisation. As a
-   defensive measure the scraper also normalises body text to NFC
-   so most Vietnamese arrives precomposed.
+   stacked-wrong. The body text needs a real shaper:
+   **`github.com/go-text/typesetting`** for shaping plus
+   `golang.org/x/image/font/opentype` for glyph rasterisation.
+   Defensively, the scraper normalises body text to NFC so most
+   Vietnamese arrives precomposed.
 2. **Emoji grapheme clusters.** ZWJ sequences (`👨‍👩‍👧` =
    `1F468 200D 1F469 200D 1F467`) and skin-tone modifiers
-   (`👍🏽` = `1F44D 1F3FD`) are *one* visual glyph but multiple
-   codepoints. Iteration must use grapheme-cluster segmentation via
-   **`github.com/rivo/uniseg`**. The lookup order per cluster is:
-   (a) NFC-normalise body text once up-front (preserves FE0F); then
-   (b) per cluster, strip FE0F variation selectors before building
-   the `-`-joined hex codepoint string used as the Twemoji filename
-   key. Twemoji's bundle does not include FE0F in filenames, so the
-   strip must happen at lookup time even though NFC leaves FE0F in
-   place.
+   (`👍🏽` = `1F44D 1F3FD`) are one visual glyph but multiple
+   codepoints. Iteration uses grapheme-cluster segmentation via
+   **`github.com/rivo/uniseg`**. Lookup order per cluster: NFC body
+   text first (NFC preserves FE0F), then for each cluster strip
+   FE0F variation selectors and build a `-`-joined hex codepoint
+   filename for the Twemoji bundle. Twemoji filenames don't include
+   FE0F, so the strip is required at lookup time.
 
-### De-risk gate (before adopting pure-Go for real)
+### De-risk gate (Vietnamese required; emoji best-effort)
 
-Before wiring the renderer into the downloader, the plan builds a
-single throwaway test:
+Before wiring the renderer into the sync pipeline, the plan builds
+one test:
 
 ```
 TestRenderFixture_ShapingAndEmoji
 ```
 
-It renders one fixture comment list containing:
+It renders one fixture containing:
 
-- Vietnamese in both NFC and NFD forms (`ế` vs `ế`)
+- Vietnamese in both NFC and NFD forms (`ế` vs `ế`)
 - A ZWJ family emoji (`👨‍👩‍👧`)
 - A skin-tone-modified emoji (`👍🏽`)
 - A plain BMP emoji (`😀`)
-- Mixed Latin + Vietnamese in one line to exercise the shaper
+- Mixed Latin + Vietnamese in one line
 
-**Assertions are structural, not byte-exact.** Antialiasing and
-freetype-hinting outputs drift across Go versions and build flags,
-so a byte-exact golden PNG would be perpetually flaky. The test
-instead asserts:
+Assertions are **structural, not byte-exact** (antialiasing drifts
+across builds), and split into hard and soft tiers:
 
-- The output is a non-empty, valid PNG (decode round-trip succeeds).
-- One distinct glyph region per grapheme cluster on each line,
-  detected via run-length scanning of non-background pixels. Catches
-  ZWJ sequences that render as separate emoji instead of one.
-- Twemoji-sourced regions are colour (saturation above a threshold);
-  text-sourced regions are near-monochrome. Catches the
-  emoji-as-`.notdef`-tofu failure mode.
-- No row of pixels in body text shows the stacked-mark signature of
-  broken Vietnamese diacritic positioning.
+**Required (gate):**
+- The output is a non-empty, valid PNG.
+- Vietnamese composed and decomposed forms render correctly — no
+  stacked-mark signature (a heuristic for broken diacritics).
+- The renderer does not crash or hang on any of the emoji inputs.
 
-**If pure Go can't make these pass, we accept degraded emoji
-output.** The body-text shaping (Vietnamese diacritics) is the
-load-bearing requirement; emoji are decoration. If
-`go-text/typesetting` + the Twemoji bundle can't render a particular
-class of emoji (e.g. ZWJ family sequences) correctly, the renderer
-falls back to drawing the raw codepoint glyph via Noto (which gives
-a tofu box) or simply omitting the cluster. Vietnamese text MUST
-render correctly; emoji are best-effort. No headless-browser
-fallback — the project stays a single pure-Go binary.
+**Best-effort (warn, don't fail):**
+- ZWJ family and skin-tone emoji render as one cluster.
+- Twemoji-sourced regions are colour (saturation above a threshold)
+  while text regions are near-monochrome.
 
-The de-risk test is therefore split into two assertions of
-different strictness:
-
-- **Required (gate):** Vietnamese composed/decomposed renders
-  correctly (no stacked marks); plain BMP emoji renders as a
-  coloured glyph or tofu (but does not crash the renderer).
-- **Best-effort (warn, don't fail):** ZWJ sequences and skin-tone
-  modifiers render as one cluster. Failure here logs a warning but
-  the test passes.
+If pure Go can't make these pass, **we accept degraded emoji
+output**. Vietnamese MUST render correctly; emoji are decoration.
+No headless-browser fallback — the project stays a single pure-Go
+binary.
 
 ### Bidi (deferred)
 
 Vietnamese is LTR Latin, so RTL bidi is moot in practice. If a
-commenter pastes Arabic/Hebrew we accept visual mojibake — explicitly
-out of scope.
+commenter pastes Arabic/Hebrew we accept visual mojibake —
+explicitly out of scope.
 
 ## Concurrency
 
-**Scenario A**: reuse the existing chapter worker pool. The comments
-step is one or two HTTP requests + a CPU-bound render; it slots into
-the same goroutine that already handles a chapter's images. Each
-chapter's PNG and sentinel land in a *separate* folder, so workers
-do not contend on the same file.
+A single chapter worker pool (default size 4) processes the task
+list. Tasks are independent — each writes its outputs into a
+chapter-specific subdirectory of the scratch root, so workers do
+not contend on files.
 
-**Scenario B**: scrape + render concurrently (worker pool, same
-size as the existing image-download pool), but **the archive write
-is a single serialised step at the end** of each manga. We never
-have multiple goroutines mutating one `.cbz`. The pseudocode above
-reflects this — workers populate the scratch directory in parallel;
-the `buildTmpArchive` / rename happens once at the end. Multiple
-*mangas* can be processed serially (one at a time) per
-`--comments-only` run; cross-manga parallelism is not worth the
-complexity for ~15 archives.
+The archive write at the end of the run is a single serialised
+step. Multiple workers never mutate the `.cbz`.
 
-## Folder-naming correctness
+Across mangas, runs are serial (one `<url>` per invocation). The
+existing CLI doesn't bulk-process and this design doesn't add that.
 
-The downloader's current `chapterFolder` (in
-`internal/downloader/downloader.go`) does three things that scenario
-B must reproduce exactly:
-
-1. `folderWidth` is dynamic — `max(4, len(maxChapterNumber))` — so a
-   manga with chapter 10500 uses 5-digit padding.
-2. Fractional chapters are encoded `chap-0032-5`, not `chap-0032.5`.
-   The dot-to-dash substitution happens at folder-creation time.
-3. The chapter `Number` field is the raw URL token (`12-5`),
-   normalised to `12.5` for sorting and reverted for the folder name.
-
-To prevent the archive injector from drifting from this convention,
-`chapterFolder` and `folderWidth` move to a new
-`internal/layout/folder.go` with exported `Folder` and `FolderWidth`
-functions. The downloader's existing call site becomes a one-line
-delegate. Tests for the existing folder behaviour move with it.
-
-## Safe archive update (scenario B)
+## Safe archive update
 
 The naive plan (per-chapter `zip -u <name>.cbz chap-NNNN/...`) has
 two problems:
 
-- **Concurrent writes** to the same `.cbz` corrupt the central
-  directory. The pool would have to be serialised anyway.
-- **Crash during CD rewrite** (SIGKILL, power loss) leaves the
-  payload bytes on disk but an unreadable archive. Worse, the
-  "PNG is the sentinel" idea silently breaks: the next run reads
-  the (broken) CD, sees no PNG, retries against an already-corrupt
-  archive.
+- Concurrent writes corrupt the central directory; the pool would
+  have to be serialised regardless.
+- A SIGKILL or power loss during the central-directory rewrite
+  leaves payload bytes on disk but an unreadable archive. Worse,
+  any "PNG presence is the sentinel" logic would silently retry
+  against an already-corrupt archive on the next run.
 
-The implementation therefore uses a **stage-and-rename** pattern,
-once per manga, not per chapter:
+The implementation uses a **stage-and-rename** pattern, once per
+run, not per chapter:
 
-1. Create `<name>.cbz.tmp` **in the same directory as the target
-   `.cbz`** (i.e. alongside the manga, not in `$TMPDIR`). `os.Rename`
-   is only atomic within a filesystem; co-locating the tmp with the
-   target guarantees that property. If an existing
-   `<name>.cbz.tmp` is present (orphaned from a prior killed run),
-   overwrite it — `os.Create` does that already.
-2. Stream every entry from the original `.cbz` into the tmp via
-   `archive/zip` with no decompression cycle:
+1. Create `<name>.cbz.tmp` **in the same directory as `<name>.cbz`**
+   (i.e. alongside the manga, not in `$TMPDIR`). `os.Rename` is only
+   atomic within a filesystem; co-locating guarantees that property.
+   If an existing `<name>.cbz.tmp` is present (orphaned from a prior
+   killed run), `os.Create` overwrites it.
+2. If `<name>.cbz` exists, stream every entry from it into the tmp
+   with no decompression cycle:
 
    ```
    for _, f := range zr.File:
        rc, _ := f.OpenRaw()                  // undecompressed bytes
        hdr := f.FileHeader                   // preserves method,
                                               // CRC32, sizes, name
-       w, _ := zw.CreateRaw(&hdr)            // raw mode: no recompute
+       w, _ := zw.CreateRaw(&hdr)            // raw mode
        io.Copy(w, rc)
    ```
 
    `CreateRaw` requires `CRC32`, `CompressedSize64`, and
    `UncompressedSize64` to already be populated on the header —
-   `f.FileHeader` already has them, so the field-by-field copy is
-   trivial. This is essential: using `Open()` + `Create()` would
-   decompress and re-deflate every existing entry, turning a few
-   seconds into many minutes on a 6 GB archive.
-3. Append the newly rendered `chap-NNNN[-K]/zzz-comments.png`
-   entries with `Method = zip.Store` (compression level 0) to match
-   the rest of the archive. PNG is already compressed; deflating it
-   again wastes CPU for under 1% size reduction.
+   `f.FileHeader` already has them. Using `Open()` + `Create()`
+   would decompress and re-deflate every entry, turning seconds
+   into minutes on multi-GB archives.
+
+3. Walk `scratchRoot/**` and add each file with `Method =
+   zip.Store` (compression level 0) to match the existing store-only
+   archive convention. Image bytes (JPEG/WebP) and PNG comment
+   pages don't benefit from deflate.
 4. Close the writer (this writes the central directory).
-5. Exec `unzip -t <name>.cbz.tmp` (returns 0 on a healthy archive)
-   as a cheap verification.
+5. Exec `unzip -t <name>.cbz.tmp` as a cheap verification (returns 0
+   on a healthy archive).
 6. `os.Rename(<name>.cbz.tmp, <name>.cbz)` — atomic on the same
-   filesystem (guaranteed by step 1's placement choice).
-7. On any failure between (1) and (6), delete the tmp and exit
-   with a clear error. The original `<name>.cbz` is never mutated.
+   filesystem.
+7. On any failure between (1) and (6), delete the tmp and exit with
+   a clear error. The original `<name>.cbz` is never mutated.
 
-This costs one extra `~size-of-cbz` write per manga (so up to ~7 GB
+This costs one extra archive-sized write per run (so up to ~7 GB
 once for the biggest archives) but the original is *never* in a
-half-rewritten state, and we don't need a per-archive mutex — the
-write is single-threaded by construction.
+half-rewritten state.
 
-**Zip64.** Go's stdlib `archive/zip.Writer` automatically emits
-Zip64 entries when sizes/counts cross the 4 GB / 65535 thresholds.
+**Zip64.** Go's `archive/zip.Writer` automatically emits Zip64
+entries when sizes/counts cross the 4 GB / 65535 thresholds.
 Archives that were created without Zip64 will be re-emitted with
 Zip64 after the rebuild if they cross the threshold. Modern comic
-readers handle Zip64; this is noted, not a blocker.
+readers handle this.
 
 ## Failure modes
 
 | Failure | Handling |
 |---|---|
-| Cloudflare 403 on chapter page or AJAX endpoint | Surface "refresh cf_clearance + --resume" error (existing pattern), exit 1. |
-| Page-2 endpoint returns 5xx after retries | Treat as page-1-only; write `.comments.done` (A) or render PNG with only page-1 comments (B); continue. |
+| Cloudflare 403 on chapter page or AJAX endpoint | Surface the existing "refresh `cf_clearance` and re-run" error, exit 1. |
+| Page-2 endpoint returns 5xx after retries | Treat as page-1-only; render with what we have; continue. |
 | Page-2 response empty / `<article>` count 0 | Same as above. |
-| Render error (font load fail, image decode fail) | Fail the chapter — do NOT write `.comments.done` (A) / do NOT include this chapter's PNG in the staged archive (B). Next run retries. |
-| Scrape parses zero comments on page 1 too | A: write `.comments.done`, no PNG. B: skip this chapter; on next run we'll re-scrape (cheap, ~1 HTTP request). |
-| Scenario B: chapter exists in archive but not in re-fetched chapter list | Log "no URL match for `<folder>`", skip. Never silently wrong. |
-| Scenario B: `unzip -t` of the tmp archive fails | Delete the tmp, log the error, exit 1. Original `.cbz` untouched. |
-| Scenario B: SIGKILL between step (1) and step (6) | Tmp is orphaned, original `.cbz` untouched. Next run starts fresh. (Optional cleanup: at startup, remove any `*.cbz.tmp` files older than 1 hour.) |
+| Render error for a chapter (font load fail, image decode fail) | Skip that chapter's comment PNG for this run; continue. Next run retries. |
+| Image fetch fails for a chapter mid-run | Chapter's scratch dir incomplete — exclude that chapter from the stage step. Next run retries. |
+| Scrape parses zero comments | No `zzz-comments.png` is written. On future `sync-comments` / `sync-manga` runs we'll re-scrape (cheap, ~1 GET). Accepted cost. |
+| Chapter exists in `.cbz` but not in fresh chapter list (renumbered) | Log "no source match for `<folder>`", leave existing entry as-is. Never silently delete. |
+| `unzip -t` on tmp fails | Delete tmp, log, exit 1. Original untouched. |
+| SIGKILL between step (1) and step (6) | Tmp orphaned, original untouched. On next run, `os.Create` overwrites the orphan. (Optional: start-of-run sweep removes `*.cbz.tmp` older than 1 hour.) |
+| `sync-comments` invoked but `.cbz` does not exist | Print "no archive to backfill at `<path>`; run `sync-manga` first"; exit 0. |
 
-## CBZ packaging
+## Migration from current state
 
-`package-cbz.sh` uses `zip -u -0` (store-mode update) already, so
-re-running it after a scenario-A backfill appends new
-`zzz-comments.png` files to existing archives in seconds. One change
-to the script: add `.comments.done` to the exclude list (alongside
-`.done`, `.chapters.json`, `.DS_Store`) so the sentinel doesn't leak
-into the archive.
+Existing on-disk artefacts:
 
-Scenario B does *not* go through `package-cbz.sh`; it rebuilds the
-archive in Go directly (see "Safe archive update").
+- `~/Documents/Manga/<name>.cbz` files — these are the input to the
+  new design. Untouched until the first run; updated via
+  stage-and-rename on the first applicable run.
+- `~/Documents/Manga/<name>/chap-*/` folders (if any survive) —
+  obsoleted. The new tool does not look at them. Users may delete
+  them manually after confirming their corresponding `.cbz` is
+  intact. We won't write a migration script — the user has already
+  consolidated to CBZ-only.
+- `~/Documents/Manga/<name>/.chapters.json` — gone with the
+  folders. The new tool re-fetches the chapter list per run.
+
+`package-cbz.sh` is no longer the bundling path. It is kept in the
+repo for backwards compatibility with any user who has a chapter
+folder they want to convert manually, but it is no longer invoked
+by any documented workflow. The README is updated accordingly.
 
 ## Testing
 
-- **Layout tests**: cover the round-trip — `Folder(num, max)`
-  produces the same string for both freshly-fetched chapter numbers
-  and the names already in checked-in fixture archives. Cover
-  `chap-0032-5`, dynamic widths (`max="10500"` ⇒ 5-digit padding),
-  and the boundary at `max="9999"` vs `max="10000"`.
-- **Scraper unit tests**: checked-in HTML fixtures
-  (`chapter-with-comments.html` for page 1, `page2-fragment.html` for
-  the AJAX response). Verify field extraction, emote stripping, the
-  page-2 empty-response branch, and NFC normalisation of body text.
-- **Fetcher POST tests**: extend the existing fetcher test suite to
-  cover the new `Post` method — retries on 5xx, 403 surfaces as
-  Cloudflare-expiry, cookies and UA are sent.
-- **Renderer de-risk test** (gate): the
-  `TestRenderFixture_ShapingAndEmoji` test described in
-  "De-risk gate" above. Must pass before any of the sync code is
-  written.
+- **Layout tests**: round-trip — `Folder(num, max)` produces the
+  same string for freshly-fetched chapter numbers and the names
+  already in checked-in fixture archives. Covers `chap-0032-5`,
+  dynamic widths, and the boundary at `max="9999"` vs `"10000"`.
+- **Scraper unit tests**: HTML fixtures (`chapter-with-comments.html`
+  for page 1, `page2-fragment.html` for the AJAX response). Verify
+  field extraction, emote stripping, the page-2 empty-response
+  branch, and NFC normalisation.
+- **Fetcher POST tests**: extend existing tests — retries on 5xx,
+  403 surfaces as Cloudflare-expiry, cookies/UA sent, Referer sent.
+- **Renderer de-risk test** (gate): `TestRenderFixture_ShapingAndEmoji`
+  as described above. Must pass before any sync code is written.
 - **Renderer unit tests**: long-body wrapping, very long usernames,
-  zero comments (must not be called), the like-count formatting.
-- **Folder-sync end-to-end**: a fake `Fetcher` returning the fixture
-  HTML exercises `comments.SyncFolder` and asserts `.comments.done`
-  and `zzz-comments.png` land in the right place.
-- **Archive-sync end-to-end** (using stdlib `archive/zip` to build
-  and inspect a fixture archive, no shell-out):
-  - Build a small `sample.cbz` containing two `chap-NNNN/` folders
-    of fake JPEGs.
-  - Run `comments.SyncArchive` with a fake fetcher.
-  - Assert: (a) the rewritten archive contains the new
-    `chap-NNNN[-K]/zzz-comments.png` entries; (b) every original
-    entry is byte-for-byte identical (compare raw stored bytes,
-    not just names); (c) re-running with the same input is a no-op
-    (no tmp left behind, original mtime unchanged); (d) a fractional
-    chapter folder `chap-0032-5/` is matched correctly to its URL.
-  - Crash-safety test: inject a `panic()` after the tmp is written
-    but before the rename; assert original is untouched and tmp is
-    cleaned up on next run.
+  zero comments (must not be called), like-count formatting.
+- **Archive package**:
+  - `Inspect` returns the expected `Have` / `HaveComments` sets for
+    a checked-in fixture archive containing two chapters (one with
+    a `zzz-comments.png`, one without).
+  - `StageAndRename` against an existing archive: rewritten archive
+    contains all original entries byte-for-byte (compare raw stored
+    bytes via `OpenRaw`), plus the new scratch entries.
+  - `StageAndRename` against a non-existent target: creates a fresh
+    archive containing only the scratch entries.
+  - Re-running with an unchanged scratch dir is a no-op-equivalent
+    (the new archive contains the same entries as before).
+  - Fractional folder `chap-0032-5/` round-trips correctly.
+  - Crash-safety: panic injected after tmp is written but before
+    rename — assert original untouched and tmp is cleaned up on
+    next run.
+- **Mode dispatch tests** (lightweight): fake `Site`, fake
+  `Fetcher`, fake archive Inspection. For each mode, assert the
+  task list contains exactly the expected work for a manga whose
+  chapter list and archive state are configured to exercise the
+  matrix (some new chapters, some existing chapters with comments,
+  some existing chapters without).
 
 ## Open / deferred decisions
 
-- **Twemoji bundle size.** Full set is ~4 MB embedded. Acceptable per
-  the project's single-binary philosophy. Could be trimmed to the
-  most-used ~1000 emoji later if size becomes a concern.
-- **Hi-DPI rendering.** Output is 1× for now. If readability is poor
-  on hi-DPI displays, bump to 2× — trivial change later.
-- **No-comments PNG.** Currently we render nothing for chapters with
-  zero comments. Open to changing this if you'd prefer a tiny "No
-  comments" marker page for consistency. **Side effect of leaving
-  this off:** scenario B has no sentinel for zero-comment chapters,
-  so every `--comments-only` run re-scrapes them (one cheap GET per
+- **Twemoji bundle size.** Full set is ~4 MB embedded. Acceptable
+  per the project's single-binary philosophy.
+- **Hi-DPI rendering.** Output is 1× for now. Trivial to bump to 2×
+  later.
+- **No-comments PNG.** Chapters with zero comments get no PNG, so
+  `sync-comments` will re-scrape them every run (~1 GET per
   chapter, no AJAX POST). For ~15 manga × hundreds of chapters
-  that's bounded and fine; revisit only if it becomes noticeable.
+  that's bounded. Could add a manga-level sidecar of "checked,
+  empty" markers later if the cost becomes noticeable.
+- **`sync-manga` semantics when archive exists but is partial /
+  damaged.** Currently `sync-manga` does not re-fetch chapters whose
+  image folders are already in the archive (even if they contain
+  zero images, which shouldn't happen but…). A future "repair"
+  mode could detect a chapter folder with fewer images than the
+  source page advertises and refetch. Out of scope for v1.
