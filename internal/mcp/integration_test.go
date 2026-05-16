@@ -95,3 +95,59 @@ func mustUnmarshalStructured(t *testing.T, res *sdk.CallToolResult, dst any) {
 		t.Fatalf("unmarshal %s into %T: %v", b, dst, err)
 	}
 }
+
+func TestTool_ListAndInspect(t *testing.T) {
+	srv, client := newTestPair(t)
+	writeFakeArchive(t, srv.opts.Root, "Foo.cbz", []string{"chap-001/001.jpg"})
+
+	listRes, err := client.CallTool(context.Background(), &sdk.CallToolParams{Name: "list_manga"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list []MangaEntry
+	mustUnmarshalStructuredAs(t, listRes, &struct {
+		Items *[]MangaEntry `json:"items"`
+	}{Items: &list})
+	if len(list) != 1 || list[0].Name != "Foo" {
+		t.Fatalf("list = %+v", list)
+	}
+
+	inspRes, err := client.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "inspect_manga",
+		Arguments: map[string]any{"name": "Foo"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry MangaEntry
+	mustUnmarshalStructured(t, inspRes, &entry)
+	if entry.Chapters != 1 {
+		t.Fatalf("chapters = %d", entry.Chapters)
+	}
+
+	missing, err := client.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "inspect_manga",
+		Arguments: map[string]any{"name": "Nope"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !missing.IsError || missing.Meta["error_code"] != CodeNoArchive {
+		t.Fatalf("expected NO_ARCHIVE, got IsError=%v meta=%v text=%q",
+			missing.IsError, missing.Meta["error_code"], contentText(missing))
+	}
+}
+
+func mustUnmarshalStructuredAs(t *testing.T, res *sdk.CallToolResult, wrapper any) {
+	t.Helper()
+	if res.StructuredContent == nil {
+		t.Fatalf("no structured content; text: %s", contentText(res))
+	}
+	b, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, wrapper); err != nil {
+		t.Fatal(err)
+	}
+}
