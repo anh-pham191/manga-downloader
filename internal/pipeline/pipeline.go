@@ -54,7 +54,10 @@ func Run(ctx context.Context, opts Opts) error {
 	if !got {
 		return ErrAnotherInstance
 	}
-	defer lock.Unlock()
+	defer func() {
+		lock.Unlock()
+		os.Remove(lockPath)
+	}()
 
 	insp, err := archive.Inspect(cbzPath)
 	if err != nil {
