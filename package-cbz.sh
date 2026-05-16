@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# package-cbz.sh — LEGACY (kept for backwards compatibility).
+#
+# As of feature/comment-pages, the downloader writes directly into
+# the .cbz via internal/archive/StageAndRename. New users do not
+# need this script. It is preserved so anyone with leftover chapter
+# folders from the pre-CBZ era can still bundle them manually.
+#
 # package-cbz.sh — bundle each manga folder into a .cbz next to it.
 #
 # Usage:

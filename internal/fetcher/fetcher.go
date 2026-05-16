@@ -5,7 +5,10 @@
 // depends on.
 package fetcher
 
-import "context"
+import (
+	"context"
+	"net/url"
+)
 
 // Request describes one HTTP GET to perform. Referer is sent as the
 // Referer header — required by the source site's hot-link protection
@@ -26,4 +29,5 @@ type Response struct {
 // each call as a single all-or-nothing operation.
 type Fetcher interface {
 	Get(ctx context.Context, req Request) (*Response, error)
+	Post(ctx context.Context, req Request, form url.Values) (*Response, error)
 }
