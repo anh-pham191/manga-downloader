@@ -7,6 +7,7 @@ package layout
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -68,4 +69,57 @@ func digitWidth(n int) int {
 		n /= 10
 	}
 	return w
+}
+
+// CommentsFilename is the fixed filename used for the rendered
+// reader-comments page inside a chapter folder. The zzz- prefix
+// makes it sort last alphabetically, so comic readers display it
+// as the final page of the chapter.
+const CommentsFilename = "zzz-comments.png"
+
+// ImageName returns the filename for the N-th image in a chapter
+// (1-indexed), zero-padded to a minimum of 3 digits. Anything past
+// 999 still renders correctly but loses the leading zero.
+func ImageName(index int, ext string) string {
+	return fmt.Sprintf("%03d.%s", index, ext)
+}
+
+var chapterFolderPattern = regexp.MustCompile(`^chap-\d+(-\d+)?$`)
+var imageEntryPattern = regexp.MustCompile(`^chap-\d+(-\d+)?/[^/]+\.(jpg|jpeg|png|webp)$`)
+
+// IsImageEntry reports whether a zip-entry name matches the
+// downloader's image-name convention inside a chapter folder. The
+// comments PNG (CommentsFilename) is not counted as an image entry.
+func IsImageEntry(zipEntryName string) bool {
+	if !imageEntryPattern.MatchString(zipEntryName) {
+		return false
+	}
+	if filepath.Base(zipEntryName) == CommentsFilename {
+		return false
+	}
+	return true
+}
+
+// InferredWidth returns the zero-padding width observed across a
+// set of chap-NNNN[-K] folder names. Returns 0 if the set is
+// empty or contains no parseable chapter folders. If the set has
+// inconsistent widths (e.g. from historical bugs), returns the
+// maximum.
+func InferredWidth(folders map[string]bool) int {
+	max := 0
+	for name := range folders {
+		if !chapterFolderPattern.MatchString(name) {
+			continue
+		}
+		// "chap-" prefix is 5 chars; the whole-number part runs
+		// until "-" (fractional) or end of string.
+		body := name[len("chap-"):]
+		if i := strings.IndexByte(body, '-'); i != -1 {
+			body = body[:i]
+		}
+		if len(body) > max {
+			max = len(body)
+		}
+	}
+	return max
 }
