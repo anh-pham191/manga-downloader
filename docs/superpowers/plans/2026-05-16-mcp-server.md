@@ -69,17 +69,21 @@ import (
 
 // TestServer_Initialize asserts the server starts, advertises its
 // implementation name, and lists the registered tools.
+//
+// Initialization happens inside ClientSession.Connect — there is no
+// separate Initialize() call. ServerInfo is reachable via
+// sess.InitializeResult().
 func TestServer_Initialize(t *testing.T) {
-	srv, client := newTestPair(t)
+	srv, sess := newTestPair(t)
 
-	res, err := client.Initialize(context.Background(), &sdk.InitializeParams{})
-	if err != nil {
-		t.Fatalf("initialize: %v", err)
+	init := sess.InitializeResult()
+	if init == nil {
+		t.Fatal("no InitializeResult after Connect")
 	}
-	if res.ServerInfo.Name != "manga-downloader" {
-		t.Fatalf("server name = %q, want %q", res.ServerInfo.Name, "manga-downloader")
+	if init.ServerInfo.Name != "manga-downloader" {
+		t.Fatalf("server name = %q, want %q", init.ServerInfo.Name, "manga-downloader")
 	}
-	tools, err := client.ListTools(context.Background(), &sdk.ListToolsParams{})
+	tools, err := sess.ListTools(context.Background(), &sdk.ListToolsParams{})
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
@@ -89,8 +93,9 @@ func TestServer_Initialize(t *testing.T) {
 	_ = srv
 }
 
-// newTestPair wires an in-memory client to a fresh server.
-// It is used by every integration-style test in this package.
+// newTestPair wires an in-memory client to a fresh server using the
+// SDK's documented Connect/Connect pair. Both sides are non-blocking;
+// no goroutine to manage.
 func newTestPair(t *testing.T) (*Server, *sdk.ClientSession) {
 	t.Helper()
 	opts := Opts{
@@ -102,7 +107,9 @@ func newTestPair(t *testing.T) (*Server, *sdk.ClientSession) {
 		t.Fatalf("new server: %v", err)
 	}
 	clientT, serverT := sdk.NewInMemoryTransports()
-	go func() { _ = srv.sdk.Run(context.Background(), serverT) }()
+	if _, err := srv.sdk.Connect(context.Background(), serverT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
 	c := sdk.NewClient(&sdk.Implementation{Name: "test", Version: "0"}, nil)
 	sess, err := c.Connect(context.Background(), clientT, nil)
 	if err != nil {
@@ -189,7 +196,7 @@ And add:
 ```go
 func runMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
-	root := fs.String("out", defaultMangaRoot(), "manga root directory")
+	root := fs.String("out", defaultOutDir(), "manga root directory")
 	cookies := fs.String("cookies", defaultCookiesPath(), "path to cookies.json")
 	verbose := fs.Bool("verbose", false, "verbose logging to stderr")
 	if err := fs.Parse(args); err != nil {
@@ -213,7 +220,7 @@ func runMCP(args []string) error {
 }
 ```
 
-Add the imports: `"io"`, `"github.com/anhpham/downloader/internal/mcp"`. Reuse the existing `defaultMangaRoot()` and `defaultCookiesPath()` helpers in `main.go`. If those helpers don't exist under those names yet, extract them from the inline code where the CLI builds the defaults today.
+Add the imports: `"io"`, `"github.com/anhpham/downloader/internal/mcp"`. Reuse the existing `defaultOutDir()` (`main.go:137`) and `defaultCookiesPath()` (`main.go:144`) helpers.
 
 Also update the `usage()` text to list `mcp` alongside the three sync subcommands.
 
@@ -616,11 +623,17 @@ func pickDomain(cf *fetcher.CookieFile, requested string) string {
 	return defaultCookieDomain
 }
 
+// setOrAppend updates the value of the first cookie with this name,
+// or appends a new entry. When updating an existing entry, the
+// requested `domain` overwrites the stored one — this lets callers
+// fix a wrong-domain cookie via update_cookie, not just rotate the
+// value. (Source sites rebrand occasionally; the user shouldn't have
+// to hand-edit cookies.json for that.)
 func setOrAppend(cf *fetcher.CookieFile, name, value, domain string) {
 	for i := range cf.Cookies {
 		if cf.Cookies[i].Name == name {
 			cf.Cookies[i].Value = value
-			if cf.Cookies[i].Domain == "" {
+			if domain != "" {
 				cf.Cookies[i].Domain = domain
 			}
 			return
@@ -760,6 +773,11 @@ func TestTool_UpdateCookieRejectsEmpty(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("expected IsError=true on empty value")
 	}
+	// Two channels for the code so Claude can branch deterministically
+	// without parsing free-form text: Meta.error_code, plus the body.
+	if got := res.Meta["error_code"]; got != CodeBadInput {
+		t.Fatalf("Meta.error_code = %v, want %q", got, CodeBadInput)
+	}
 	if !strings.Contains(contentText(res), CodeBadInput) {
 		t.Fatalf("error text %q must contain code %q", contentText(res), CodeBadInput)
 	}
@@ -775,6 +793,11 @@ func contentText(res *sdk.CallToolResult) string {
 	return b.String()
 }
 
+// mustUnmarshalStructured round-trips res.StructuredContent through
+// JSON into dst. The SDK field is `any` containing the raw Output
+// struct the handler returned; marshalling it produces the same JSON
+// the wire would carry. If a future SDK version wraps this in a
+// container type, drill into the wrapper's exported value field here.
 func mustUnmarshalStructured(t *testing.T, res *sdk.CallToolResult, dst any) {
 	t.Helper()
 	if res.StructuredContent == nil {
@@ -785,7 +808,7 @@ func mustUnmarshalStructured(t *testing.T, res *sdk.CallToolResult, dst any) {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(b, dst); err != nil {
-		t.Fatal(err)
+		t.Fatalf("unmarshal %s into %T: %v", b, dst, err)
 	}
 }
 ```
@@ -857,9 +880,10 @@ func (s *Server) registerCookieTools() {
 	)
 }
 
-// toolErr converts a ToolError into a CallToolResult with IsError=true.
-// The SDK returns this as a JSON-RPC success with an error flag, which
-// is what Claude expects so it can read the body.
+// toolErr converts a ToolError into a CallToolResult with
+// IsError=true. The code goes in BOTH the text body (so a human
+// reading transcripts sees it) and the Meta map (so Claude can
+// branch deterministically without parsing the text).
 func toolErr(te *ToolError) *sdk.CallToolResult {
 	if te == nil {
 		return nil
@@ -869,6 +893,7 @@ func toolErr(te *ToolError) *sdk.CallToolResult {
 		Content: []sdk.Content{
 			&sdk.TextContent{Text: te.Error()},
 		},
+		Meta: map[string]any{"error_code": te.Code},
 	}
 }
 ```
@@ -1145,8 +1170,9 @@ func TestTool_ListAndInspect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !missing.IsError || !strings.Contains(contentText(missing), CodeNoArchive) {
-		t.Fatalf("expected NO_ARCHIVE, got %v %q", missing.IsError, contentText(missing))
+	if !missing.IsError || missing.Meta["error_code"] != CodeNoArchive {
+		t.Fatalf("expected NO_ARCHIVE, got IsError=%v meta=%v text=%q",
+			missing.IsError, missing.Meta["error_code"], contentText(missing))
 	}
 }
 
@@ -1715,6 +1741,9 @@ func TestTool_SyncCFExpiredFlow(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("expected IsError on CF expiry")
 	}
+	if got := res.Meta["error_code"]; got != CodeCFTokenExpired {
+		t.Fatalf("Meta.error_code = %v, want %q", got, CodeCFTokenExpired)
+	}
 	if !strings.Contains(contentText(res), CodeCFTokenExpired) {
 		t.Fatalf("missing %s in %q", CodeCFTokenExpired, contentText(res))
 	}
@@ -1821,17 +1850,21 @@ type CancelOutput struct {
 	WasRunning string `json:"was_running,omitempty"`
 }
 
+// SyncExecutor.Run always returns either nil or a *ToolError
+// (see internal/mcp/sync.go), so the handler can use it directly
+// without re-mapping. errors.As stays for defensive symmetry against
+// future refactors.
 func (s *Server) syncHandler(mode pipeline.Mode) func(context.Context, *sdk.CallToolRequest, SyncInput) (*sdk.CallToolResult, SyncOutput, error) {
 	return func(ctx context.Context, _ *sdk.CallToolRequest, in SyncInput) (*sdk.CallToolResult, SyncOutput, error) {
 		out, err := s.sync.Run(ctx, mode, in)
-		if err != nil {
-			var te *ToolError
-			if errors.As(err, &te) {
-				return toolErr(te), SyncOutput{}, nil
-			}
-			return toolErr(MapError(err)), SyncOutput{}, nil
+		if err == nil {
+			return nil, out, nil
 		}
-		return nil, out, nil
+		var te *ToolError
+		if errors.As(err, &te) {
+			return toolErr(te), SyncOutput{}, nil
+		}
+		return toolErr(MapError(err)), SyncOutput{}, nil
 	}
 }
 ```
@@ -1857,18 +1890,23 @@ git commit -m "mcp: register sync_manga / resume / sync_comments / cancel_run"
 **Files:**
 - Modify: `internal/mcp/server_test.go`
 
-This is one test, not a new file. The MCP protocol uses stdout for
-JSON-RPC frames; any stray `fmt.Println` corrupts it.
+The MCP protocol uses stdout for JSON-RPC frames; any stray
+`fmt.Println` from server code or a handler corrupts the channel.
+This test covers BOTH construction-time and handler-time stdout.
 
 - [ ] **Step 1: Add the test**
 
 Append to `server_test.go`:
 
 ```go
-// TestNew_DoesNotWriteStdout asserts that constructing the server
-// and registering tools never writes to stdout. Tool handlers must
-// route logs to the configured stderr logger only.
-func TestNew_DoesNotWriteStdout(t *testing.T) {
+// TestStdoutStaysClean asserts that constructing the server AND
+// invoking every read-only tool never writes to stdout. Tool
+// handlers must route logs through the configured stderr logger.
+//
+// Sync tools are excluded because they need a fully-seeded cookie
+// file + an injected runner; the integration tests in
+// integration_test.go already exercise their handler bodies.
+func TestStdoutStaysClean(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -1877,18 +1915,18 @@ func TestNew_DoesNotWriteStdout(t *testing.T) {
 	os.Stdout = w
 	t.Cleanup(func() { os.Stdout = oldStdout })
 
-	_, err = New(Opts{
-		Root:        t.TempDir(),
-		CookiesPath: t.TempDir() + "/cookies.json",
-	})
-	if err != nil {
-		t.Fatal(err)
+	_, sess := newTestPair(t)
+	for _, name := range []string{"get_cookie_status", "list_manga"} {
+		if _, err := sess.CallTool(context.Background(), &sdk.CallToolParams{Name: name}); err != nil {
+			t.Fatalf("call %s: %v", name, err)
+		}
 	}
+
 	w.Close()
 	var buf bytes.Buffer
 	_, _ = io.Copy(&buf, r)
 	if buf.Len() != 0 {
-		t.Fatalf("stdout polluted with: %q", buf.String())
+		t.Fatalf("stdout polluted with %d bytes: %q", buf.Len(), buf.String())
 	}
 }
 ```
@@ -1897,14 +1935,14 @@ Add imports: `"bytes"`, `"io"`, `"os"`.
 
 - [ ] **Step 2: Run the test**
 
-Run: `go test ./internal/mcp/... -run TestNew_DoesNotWriteStdout`
-Expected: PASS. If it fails, find the rogue `fmt.Println` (likely in `tools.go` or `server.go`) and route to `s.log` instead.
+Run: `go test ./internal/mcp/... -run TestStdoutStaysClean`
+Expected: PASS. If it fails, find the rogue `fmt.Print*` call (likely in `tools.go`, `server.go`, or one of the handler files) and route it through `s.log` instead.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add internal/mcp/server_test.go
-git commit -m "mcp: assert stdout stays clean of non-protocol bytes"
+git commit -m "mcp: assert stdout stays clean across handler calls"
 ```
 
 ---
@@ -1933,12 +1971,15 @@ on macOS):
 {
   "mcpServers": {
     "manga-downloader": {
-      "command": "/Users/anhpham/Documents/Projects/script/downloader/bin/downloader",
+      "command": "<absolute-path-to-repo>/bin/downloader",
       "args": ["mcp"]
     }
   }
 }
 ```
+
+Replace `<absolute-path-to-repo>` with the directory you cloned this
+repo into (Claude Desktop needs an absolute path).
 
 Restart Claude Desktop. You can then ask things like:
 
