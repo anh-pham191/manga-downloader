@@ -7,6 +7,8 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -128,6 +130,71 @@ func (h *HTTPFetcher) attempt(ctx context.Context, req Request) (*Response, erro
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	return &Response{Body: body, ContentType: resp.Header.Get("Content-Type")}, nil
+}
+
+// Post issues a POST application/x-www-form-urlencoded request to
+// req.URL. Cookie jar, User-Agent, retries, and Cloudflare-403
+// handling mirror Get.
+func (h *HTTPFetcher) Post(ctx context.Context, req Request, form url.Values) (*Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= h.maxAttempts; attempt++ {
+		resp, err := h.postAttempt(ctx, req, form)
+		if err == nil {
+			h.jitter()
+			return resp, nil
+		}
+		lastErr = err
+		if !shouldRetry(err) || attempt == h.maxAttempts {
+			break
+		}
+		// Exponential backoff: 500ms, 1s, 2s … mirrors Get.
+		wait := time.Duration(1<<(attempt-1)) * 500 * time.Millisecond
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil, lastErr
+}
+
+func (h *HTTPFetcher) postAttempt(ctx context.Context, req Request, form url.Values) (*Response, error) {
+	body := strings.NewReader(form.Encode())
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, req.URL, body)
+	if err != nil {
+		return nil, fmt.Errorf("build POST request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Header.Set("X-Requested-With", "XMLHttpRequest")
+	httpReq.Header.Set("Accept", "text/html, */*; q=0.01")
+	httpReq.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	httpReq.Header.Set("User-Agent", h.userAgent)
+	if req.Referer != "" {
+		httpReq.Header.Set("Referer", req.Referer)
+	}
+	// Cookies come from h.client.Jar — http.Client.Do attaches them
+	// automatically using the URL of the outgoing request.
+
+	resp, err := h.client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, ErrCloudflareExpired
+	}
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		return nil, &httpStatusError{Status: resp.StatusCode}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d for POST %s", resp.StatusCode, req.URL)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	return &Response{Body: raw, ContentType: resp.Header.Get("Content-Type")}, nil
 }
 
 func (h *HTTPFetcher) jitter() {
