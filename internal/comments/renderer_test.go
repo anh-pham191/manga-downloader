@@ -59,3 +59,27 @@ func hasNonWhitePixels(img image.Image, x0, y0, x1, y1 int) bool {
 	}
 	return false
 }
+
+func TestRender_PlainEmojiCompositesPixels(t *testing.T) {
+	cs := []Comment{{Name: "n", Body: "yay \U0001F600"}} // 😀
+	var buf bytes.Buffer
+	if err := Render(cs, &buf); err != nil {
+		t.Fatal(err)
+	}
+	img, _ := png.Decode(&buf)
+	// 😀 is yellow — the rendered image must contain a yellow
+	// pixel inside the body region.
+	found := false
+	bnds := img.Bounds()
+	for y := 60; y < bnds.Dy() && !found; y++ {
+		for x := 0; x < bnds.Dx() && !found; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			if r > 0xe000 && g > 0xc000 && b < 0x6000 {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no yellow pixel found — emoji likely rendered as tofu")
+	}
+}
