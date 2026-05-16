@@ -114,26 +114,52 @@ func Run(ctx context.Context, opts Opts) error {
 		return err
 	}
 
-	if err := runTasks(ctx, tasks, scratchRoot, opts); err != nil {
-		return err
+	failed := runTasks(ctx, tasks, scratchRoot, opts)
+	if len(failed) > 0 && opts.Logger != nil {
+		opts.Logger.Printf("warning: %d chapter task(s) failed; staging the remainder", len(failed))
+		for _, f := range failed {
+			opts.Logger.Printf("  %s: %v", f.Folder, f.Err)
+		}
 	}
 
 	if err := archive.StageAndRename(cbzPath, scratchRoot); err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
 
-	return os.RemoveAll(scratchRoot)
+	// Always remove scratch after a successful stage — the .cbz is
+	// now the source of truth. A subsequent run re-plans against
+	// the archive's contents and re-fetches anything still missing
+	// from a clean slate (the partial chapter dirs left behind by
+	// failed attempts weren't reusable anyway: executeTask nukes
+	// each chapter dir before retrying).
+	if err := os.RemoveAll(scratchRoot); err != nil {
+		return err
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%d chapter(s) failed; re-run to retry", len(failed))
+	}
+	return nil
 }
 
-func runTasks(ctx context.Context, tasks []Task, scratchRoot string, opts Opts) error {
+// TaskFailure records a single chapter task that didn't complete.
+type TaskFailure struct {
+	Folder string
+	Err    error
+}
+
+// runTasks dispatches every task to a bounded worker pool and
+// returns the list of failures (empty on full success). Individual
+// task errors are NEVER fatal — partial progress is preserved via
+// `.ok` markers and the caller decides whether to stage what's done.
+func runTasks(ctx context.Context, tasks []Task, scratchRoot string, opts Opts) []TaskFailure {
 	concurrency := opts.Concurrency
 	if concurrency < 1 {
 		concurrency = 1
 	}
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
-	var firstErr error
 	var mu sync.Mutex
+	var failures []TaskFailure
 
 	for _, t := range tasks {
 		t := t
@@ -147,15 +173,13 @@ func runTasks(ctx context.Context, tasks []Task, scratchRoot string, opts Opts) 
 			defer func() { <-sem }()
 			if err := executeTask(ctx, t, scratchRoot, opts); err != nil {
 				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
+				failures = append(failures, TaskFailure{Folder: t.Folder, Err: err})
 				mu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
-	return firstErr
+	return failures
 }
 
 func executeTask(ctx context.Context, t Task, scratchRoot string, opts Opts) error {
