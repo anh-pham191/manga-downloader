@@ -22,10 +22,10 @@ const (
 )
 
 type Task struct {
-	Folder  string  // chap-NNNN[-K]
-	Number  string  // raw chapter number
-	URL     string  // chapter URL
-	Kind    TaskKind
+	Folder string // chap-NNNN[-K]
+	Number string // raw chapter number
+	URL    string // chapter URL
+	Kind   TaskKind
 }
 
 // Plan converts (mode, source chapter list, archive inspection,

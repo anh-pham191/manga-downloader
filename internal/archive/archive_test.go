@@ -84,7 +84,12 @@ func TestStageAndRename_PreservesOriginalAndAppends(t *testing.T) {
 
 	// Scratch dir: chap-0001 has comments to add; chap-0002 is brand new.
 	scratch := t.TempDir()
-	must := func(err error) { t.Helper(); if err != nil { t.Fatal(err) } }
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	must(os.MkdirAll(filepath.Join(scratch, "chap-0001"), 0o755))
 	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0001", "zzz-comments.png"), []byte("PNG"), 0o644))
 	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0001", ".ok"), nil, 0o644))
@@ -100,7 +105,9 @@ func TestStageAndRename_PreservesOriginalAndAppends(t *testing.T) {
 	}
 
 	zr, err := zip.OpenReader(p)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer zr.Close()
 
 	got := map[string][]byte{}
@@ -137,9 +144,15 @@ func TestStageAndRename_CreatesFreshIfTargetMissing(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "fresh.cbz")
 	scratch := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(scratch, "chap-0001"), 0o755); err != nil { t.Fatal(err) }
-	if err := ioutil.WriteFile(filepath.Join(scratch, "chap-0001", "001.jpg"), []byte("X"), 0o644); err != nil { t.Fatal(err) }
-	if err := ioutil.WriteFile(filepath.Join(scratch, "chap-0001", ".ok"), nil, 0o644); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(filepath.Join(scratch, "chap-0001"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ioutil.WriteFile(filepath.Join(scratch, "chap-0001", "001.jpg"), []byte("X"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ioutil.WriteFile(filepath.Join(scratch, "chap-0001", ".ok"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := StageAndRename(p, scratch); err != nil {
 		t.Fatal(err)
