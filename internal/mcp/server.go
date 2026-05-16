@@ -20,9 +20,11 @@ type Opts struct {
 // Server is the long-lived MCP server. It owns the SDK server,
 // the run-state singleton, and the logger.
 type Server struct {
-	opts Opts
-	sdk  *sdk.Server
-	log  *log.Logger
+	opts     Opts
+	sdk      *sdk.Server
+	log      *log.Logger
+	runState *RunState
+	sync     *SyncExecutor
 }
 
 func New(opts Opts) (*Server, error) {
@@ -34,6 +36,12 @@ func New(opts Opts) (*Server, error) {
 		Name:    "manga-downloader",
 		Version: "0.1.0",
 	}, nil)
+	s.runState = &RunState{}
+	s.sync = &SyncExecutor{
+		Root:        opts.Root,
+		CookiesPath: opts.CookiesPath,
+		RunState:    s.runState,
+	}
 	s.register()
 	return s, nil
 }
