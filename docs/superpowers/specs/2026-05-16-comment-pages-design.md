@@ -65,9 +65,12 @@ Shared flags (carried over from today's CLI):
 If `<root>/<name>.cbz` does not exist:
 
 - `sync-manga` → behaves like a fresh full download (images +
-  comments for every chapter in the source list).
-- `resume` → also behaves like a fresh full download (nothing
-  already in archive ⇒ everything is "new").
+  comments for every chapter in the source list). Only this mode
+  bootstraps an archive from nothing.
+- `resume` → no-op + warning ("no archive at `<path>`; run
+  `sync-manga` first to bootstrap"); exit 0. **Resume only adds to
+  existing state.** This prevents a typo in `--name` from silently
+  starting a multi-GB fresh mirror.
 - `sync-comments` → no-op + warning ("no archive to backfill at
   `<path>`; run `sync-manga` first"); exit 0.
 
@@ -75,6 +78,20 @@ If `<root>/<name>.cbz` exists, modes behave per the matrix above.
 
 The CBZ filename uses the existing slug/`--name` rules — there is
 exactly one archive per manga.
+
+**CLI migration from the current binary:**
+
+The current `main.go` exposes a `--resume` boolean flag (and prints
+"re-run with --resume" in two error messages). Those collide with
+the new `resume` subcommand. The migration:
+
+- `--resume` boolean flag is **removed**.
+- The three subcommands replace it. There is no default — invoking
+  `./bin/downloader <url>` with no mode prints usage and exits 2.
+- The two error messages currently saying "re-run with --resume"
+  change to "re-run with `resume` or `sync-manga`."
+- `--from` / `--to` / `--concurrency` / `--cookies` / `--name` /
+  `--verbose` / `--out` are all preserved.
 
 ## Source data — chapters and comments
 
@@ -170,17 +187,28 @@ internal/
 │   │                           // CopyRawTo (CreateRaw + OpenRaw)
 │   ├── writer.go               // StageAndRename
 │   └── archive_test.go
-└── downloader/
-    └── …                       // Refactored to feed scratch dir
-                                // + delegate bundling to archive/.
+└── downloader/                // Shrinks: see "downloader residuals"
+    ├── images.go               // ImageFetch(ctx, chapURL, dest) error
+    └── images_test.go
 ```
 
 ### Single per-run pipeline
 
 ```
+0. Pick scratch root:
+       scratchRoot := filepath.Join(<root>, "." + <name> + ".scratch")
+   // Co-located with <name>.cbz (NOT $TMPDIR) so a half-finished
+   // run is obvious to the user. Deleted at the end of a clean
+   // run; an orphaned dir from a killed run is overwritten on
+   // re-run (os.MkdirAll is idempotent; per-chapter subdirs are
+   // re-checked via the .ok sentinel below).
+
 1. List source chapters:
        chapters := site.ListChapters(ctx, mangaURL)
-       width := layout.Width(chapters)
+       width := layout.Width(chapters)   // BEFORE any --from/--to
+                                          // filter; see "Width must
+                                          // see the full list".
+       chapters = filterRange(chapters, *from, *to)
 
 2. Inspect existing archive (if any):
        have, haveComments := archive.Inspect(<name>.cbz)
@@ -205,21 +233,39 @@ internal/
                        tasks += RenderComments(c)
 
 4. Execute tasks (worker pool, default concurrency 4).
-   All outputs land in a scratch directory:
+   All outputs land in the scratch directory:
        <scratchRoot>/<folder>/001.jpg, 002.jpg, …
        <scratchRoot>/<folder>/zzz-comments.png
+       <scratchRoot>/<folder>/.ok           // marker, see below
+   Each worker writes its chapter's images first, then
+   zzz-comments.png (if applicable), then `.ok` LAST. The `.ok`
+   file is the per-chapter "fully done" signal.
 
 5. Stage and rename:
        archive.StageAndRename(<name>.cbz, scratchRoot)
-       // copies existing entries via CreateRaw + OpenRaw,
-       // appends every file under scratchRoot,
-       // verifies via unzip -t, then os.Rename.
+       // copies existing archive entries via CreateRaw + OpenRaw;
+       // walks scratchRoot/* — for each chapter subdir with a .ok
+       // marker, appends all files EXCEPT .ok; chapter subdirs
+       // without .ok are skipped (their work failed mid-run);
+       // verifies the rewritten archive (see "Verification"),
+       // then os.Rename.
 
-6. Delete scratchRoot.
+6. Delete scratchRoot on clean exit.
 ```
 
 If the archive does not exist before step 5, `StageAndRename` writes
 a fresh `<name>.cbz` directly (no source entries to copy forward).
+
+### Width must see the full list
+
+`filterRange` in the current `internal/downloader/downloader.go`
+aliases its input slice (`in[:0:0]` shares the underlying array),
+which means width *must* be computed on the unfiltered list — if
+width is computed after filtering, a `--from 100 --to 110` run on
+a manga with 500 chapters would pick width 3 (max filtered number
+"110"), producing `chap-100/...` instead of `chap-0100/...` and
+diverging from any existing archive's folder names. Step 1 above
+captures the order; the implementation must preserve it.
 
 ### Fetcher changes
 
@@ -293,20 +339,47 @@ No timestamp field — the site renders relative times client-side
 
 ```go
 type Inspection struct {
-    Have         map[string]bool // folder names with ≥1 image entry
+    Have         map[string]bool // chap-NNNN[-K] folders with ≥1 image entry
     HaveComments map[string]bool // subset that also has zzz-comments.png
 }
 
 func Inspect(cbzPath string) (Inspection, error)
 
-// StageAndRename atomically merges `scratchRoot/**` into cbzPath.
-// If cbzPath does not exist, a fresh archive is written from
-// scratch. Existing entries are preserved byte-for-byte via the
-// raw-copy mechanism (CreateRaw + OpenRaw — see "Safe archive
-// update"). The tmp file is created alongside cbzPath so os.Rename
-// is atomic.
+// StageAndRename atomically merges `scratchRoot/<chap-*>/**` into
+// cbzPath. Only chapter subdirs that contain a `.ok` marker are
+// included; the marker itself is not written into the archive.
+// If cbzPath does not exist, a fresh archive is written. Existing
+// entries are preserved byte-for-byte via the raw-copy mechanism
+// (CreateRaw + OpenRaw — see "Safe archive update"). The tmp file
+// is created alongside cbzPath so os.Rename is atomic.
 func StageAndRename(cbzPath, scratchRoot string) error
 ```
+
+**Pinning `Have` / `HaveComments` semantics.** The folder-name key
+is exactly the string `layout.Folder("", number, width)` returns —
+no trailing slash, no `./` prefix. `Inspect` derives keys from zip
+entries by taking the substring before the first `/` of each
+entry's name (zip stores forward-slashes regardless of OS).
+
+An entry counts as an **image entry** if its name matches:
+
+```
+^chap-\d+(-\d+)?/[^/]+\.(jpg|jpeg|png|webp)$
+```
+
+…AND the filename portion is not `zzz-comments.png`. That avoids
+counting the comments PNG as an image, and ignores stray files
+like `.DS_Store` or `.chapters.json` if any leaked into an older
+archive.
+
+The folder counts as **having comments** if any entry matches:
+
+```
+^chap-\d+(-\d+)?/zzz-comments\.png$
+```
+
+`layout.Folder("", number, width)` never emits a trailing slash —
+`Inspect` keys match it exactly.
 
 ## Rendering details
 
@@ -441,8 +514,11 @@ run, not per chapter:
    archive convention. Image bytes (JPEG/WebP) and PNG comment
    pages don't benefit from deflate.
 4. Close the writer (this writes the central directory).
-5. Exec `unzip -t <name>.cbz.tmp` as a cheap verification (returns 0
-   on a healthy archive).
+5. Verify the tmp archive in pure Go: `zip.OpenReader(tmp)`,
+   iterate every entry, and for each call `f.OpenRaw()` +
+   `io.Copy(io.Discard, ...)` so the reader walks the compressed
+   payload and surfaces any CRC mismatch or truncated entry. No
+   external `unzip` dependency — the project stays single-binary.
 6. `os.Rename(<name>.cbz.tmp, <name>.cbz)` — atomic on the same
    filesystem.
 7. On any failure between (1) and (6), delete the tmp and exit with
@@ -469,7 +545,9 @@ readers handle this.
 | Image fetch fails for a chapter mid-run | Chapter's scratch dir incomplete — exclude that chapter from the stage step. Next run retries. |
 | Scrape parses zero comments | No `zzz-comments.png` is written. On future `sync-comments` / `sync-manga` runs we'll re-scrape (cheap, ~1 GET). Accepted cost. |
 | Chapter exists in `.cbz` but not in fresh chapter list (renumbered) | Log "no source match for `<folder>`", leave existing entry as-is. Never silently delete. |
-| `unzip -t` on tmp fails | Delete tmp, log, exit 1. Original untouched. |
+| Chapter renamed upstream (same number, new URL slug) | `have.Contains(folder)` is true (same number ⇒ same folder), so all modes skip image re-download. Stale URL silently retained. Accepted — a future "repair" mode could re-fetch on URL change. |
+| `sync-manga`: archived chapter has fewer images than the source page advertises (truncated/broken chapter from an older run) | Log a `WARN` with the folder name and the image-count delta. Do NOT re-fetch in v1 — full repair is out of scope. The warning surfaces broken state so the user can decide. |
+| Pure-Go verification of tmp fails (CRC mismatch / truncated) | Delete tmp, log, exit 1. Original untouched. |
 | SIGKILL between step (1) and step (6) | Tmp orphaned, original untouched. On next run, `os.Create` overwrites the orphan. (Optional: start-of-run sweep removes `*.cbz.tmp` older than 1 hour.) |
 | `sync-comments` invoked but `.cbz` does not exist | Print "no archive to backfill at `<path>`; run `sync-manga` first"; exit 0. |
 
@@ -483,15 +561,47 @@ Existing on-disk artefacts:
 - `~/Documents/Manga/<name>/chap-*/` folders (if any survive) —
   obsoleted. The new tool does not look at them. Users may delete
   them manually after confirming their corresponding `.cbz` is
-  intact. We won't write a migration script — the user has already
-  consolidated to CBZ-only.
+  intact. No migration script — the user has already consolidated
+  to CBZ-only.
 - `~/Documents/Manga/<name>/.chapters.json` — gone with the
   folders. The new tool re-fetches the chapter list per run.
 
 `package-cbz.sh` is no longer the bundling path. It is kept in the
 repo for backwards compatibility with any user who has a chapter
 folder they want to convert manually, but it is no longer invoked
-by any documented workflow. The README is updated accordingly.
+by any documented workflow.
+
+### `downloader` package residuals
+
+After the layout extraction (→ `internal/layout/`) and the bundling
+move (→ `internal/archive/`), `internal/downloader/` shrinks
+significantly. What it keeps:
+
+- The per-chapter image-fetch loop: given a chapter URL and a
+  destination directory, fetch the chapter's image list and write
+  zero-padded files (`001.jpg`, `002.jpg`, …) into the directory.
+  The pipeline calls this once per "needs images" task.
+- The atomic-write helper (`.part` → rename).
+- Existing retries and the Cloudflare-403-as-fatal handling.
+
+What moves out:
+
+- Folder-naming → `internal/layout/`
+- Bundling/archive I/O → `internal/archive/`
+- `.done` / `.chapters.json` sentinel writing → deleted (archive is
+  the truth now)
+- Manga-level orchestration → a new tiny `internal/pipeline/`
+  package (or kept in `main.go` if it stays short)
+
+### Doc/work items not in code
+
+- Update `README.md` to describe the three subcommands and CBZ-only
+  workflow; remove the chapter-folder layout diagram.
+- Update `PLAN.md` (the design notes for the old approach).
+- The user's auto-memory at `feedback_downloader_workflow.md`
+  currently says *"always run ./package-cbz.sh after a successful
+  download"*. That guidance is wrong once this ships — the spec
+  marks it for refresh as part of the merge.
 
 ## Testing
 
@@ -542,9 +652,14 @@ by any documented workflow. The README is updated accordingly.
   chapter, no AJAX POST). For ~15 manga × hundreds of chapters
   that's bounded. Could add a manga-level sidecar of "checked,
   empty" markers later if the cost becomes noticeable.
-- **`sync-manga` semantics when archive exists but is partial /
-  damaged.** Currently `sync-manga` does not re-fetch chapters whose
-  image folders are already in the archive (even if they contain
-  zero images, which shouldn't happen but…). A future "repair"
-  mode could detect a chapter folder with fewer images than the
-  source page advertises and refetch. Out of scope for v1.
+- **`sync-manga` semantics when archive is partial / damaged.**
+  `sync-manga` does not re-fetch chapters whose folders are
+  already in the archive. The image-count-mismatch warning above
+  surfaces the state; a future "repair" mode could re-fetch. Out
+  of scope for v1.
+- **Write amplification.** Stage-and-rename copies the entire
+  archive every run, so a `sync-comments` pass over all archives
+  is ~80 GB of writes (cumulative across ~15 archives) to add ~15
+  PNGs. Accepted as the price of crash safety. Mitigation later
+  could short-circuit when there's no work for an archive (skip
+  the rewrite entirely).
