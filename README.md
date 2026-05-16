@@ -144,6 +144,63 @@ Exit codes:
 
 ---
 
+## Claude Desktop (MCP server)
+
+The same operations are available to Claude Desktop via a local MCP
+server. Build the binary first (`go build -o bin/downloader .`),
+then add this block to your Claude Desktop config
+(`~/Library/Application Support/Claude/claude_desktop_config.json`
+on macOS):
+
+```json
+{
+  "mcpServers": {
+    "manga-downloader": {
+      "command": "<absolute-path-to-repo>/bin/downloader",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Replace `<absolute-path-to-repo>` with the directory you cloned this
+repo into (Claude Desktop needs an absolute path).
+
+Restart Claude Desktop. You can then ask things like:
+
+- "List my manga."
+- "Sync new chapters for Gintama from `<url>`."
+- "Backfill comments for Hikaru no Go from `<url>`."
+
+When Cloudflare rotates the token, the sync tool returns a
+`CF_TOKEN_EXPIRED` error and Claude will ask you for a fresh value.
+Paste the `cf_clearance` you copied from DevTools and Claude calls
+`update_cookie` for you, then retries the sync.
+
+### Tools
+
+| Tool | Purpose |
+|---|---|
+| `update_cookie` | Write a new `cf_clearance` (and optionally `user_agent` / `domain`). |
+| `get_cookie_status` | Whether the cookie file has a `cf_clearance`, its mtime, and the last 8 chars (for confirmation). |
+| `list_manga` | Every `.cbz` under `--out` with chapter + comment counts. |
+| `inspect_manga` | The same data for one named archive. |
+| `sync_manga` | New chapters + comments + backfill (mode equivalent of CLI `sync-manga`). |
+| `resume` | New chapters + comments only. |
+| `sync_comments` | Backfill comments only. |
+| `cancel_run` | Cancel the active sync. Partial progress survives via scratch markers. |
+
+### Manual smoke test (no Claude Desktop needed)
+
+```sh
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' | bin/downloader mcp
+```
+
+Expect a single JSON line on stdout naming the server
+`manga-downloader`.
+
+---
+
 ## Behaviour notes
 
 - **Atomic writes**: each image is written to `NNN.ext.part` and
