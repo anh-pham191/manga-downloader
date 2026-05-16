@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/anhpham/downloader/internal/fetcher"
+	"github.com/anhpham/downloader/internal/pipeline"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -149,5 +152,70 @@ func mustUnmarshalStructuredAs(t *testing.T, res *sdk.CallToolResult, wrapper an
 	}
 	if err := json.Unmarshal(b, wrapper); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTool_SyncCFExpiredFlow(t *testing.T) {
+	srv, client := newTestPair(t)
+	srv.sync.runFn = func(ctx context.Context, _ pipeline.Opts) error {
+		return fetcher.ErrCloudflareExpired
+	}
+	// Seed a cookie file so LoadCookieFile succeeds.
+	mustWriteJSON(t, srv.opts.CookiesPath, fetcher.CookieFile{
+		Cookies: []fetcher.CookieRecord{{Name: "cf_clearance", Value: "x", Domain: ".x"}},
+	})
+
+	res, err := client.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "resume",
+		Arguments: map[string]any{"url": "https://truyenqqko.com/truyen-tranh/x-1", "name": "X"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Fatal("expected IsError on CF expiry")
+	}
+	if got := res.Meta["error_code"]; got != CodeCFTokenExpired {
+		t.Fatalf("Meta.error_code = %v, want %q", got, CodeCFTokenExpired)
+	}
+	if !strings.Contains(contentText(res), CodeCFTokenExpired) {
+		t.Fatalf("missing %s in %q", CodeCFTokenExpired, contentText(res))
+	}
+}
+
+func TestTool_CancelRun(t *testing.T) {
+	srv, client := newTestPair(t)
+	mustWriteJSON(t, srv.opts.CookiesPath, fetcher.CookieFile{
+		Cookies: []fetcher.CookieRecord{{Name: "cf_clearance", Value: "x", Domain: ".x"}},
+	})
+
+	started := make(chan struct{})
+	srv.sync.runFn = func(ctx context.Context, _ pipeline.Opts) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	go func() {
+		_, _ = client.CallTool(context.Background(), &sdk.CallToolParams{
+			Name:      "resume",
+			Arguments: map[string]any{"url": "https://example.com/x-1", "name": "X"},
+		})
+	}()
+	<-started
+
+	cancelRes, err := client.CallTool(context.Background(), &sdk.CallToolParams{Name: "cancel_run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelRes.IsError {
+		t.Fatalf("cancel returned error: %s", contentText(cancelRes))
+	}
+	// Allow the goroutine to settle.
+	deadline := time.Now().Add(2 * time.Second)
+	for srv.runState.Snapshot() != nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if srv.runState.Snapshot() != nil {
+		t.Fatal("run still active after cancel")
 	}
 }
