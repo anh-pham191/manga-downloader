@@ -9,6 +9,7 @@ import (
 // register attaches every tool to the SDK server. Called from New().
 func (s *Server) register() {
 	s.registerCookieTools()
+	s.registerMangaTools()
 }
 
 // --- update_cookie -----------------------------------------------------------
@@ -49,6 +50,46 @@ func (s *Server) registerCookieTools() {
 				return toolErr(MapError(err)), CookieStatusResult{}, nil
 			}
 			return nil, out, nil
+		},
+	)
+}
+
+// --- list_manga / inspect_manga ---------------------------------------------
+
+type ListMangaOutput struct {
+	Items []MangaEntry `json:"items"`
+}
+
+type InspectMangaInput struct {
+	Name string `json:"name" jsonschema:"The manga name without the .cbz suffix (e.g. \"Gintama\")"`
+}
+
+func (s *Server) registerMangaTools() {
+	sdk.AddTool(s.sdk,
+		&sdk.Tool{
+			Name:        "list_manga",
+			Description: "List every .cbz archive under the manga root, with chapter count and comment coverage.",
+		},
+		func(ctx context.Context, req *sdk.CallToolRequest, _ struct{}) (*sdk.CallToolResult, ListMangaOutput, error) {
+			items, err := ListManga(s.opts.Root)
+			if err != nil {
+				return toolErr(MapError(err)), ListMangaOutput{}, nil
+			}
+			return nil, ListMangaOutput{Items: items}, nil
+		},
+	)
+
+	sdk.AddTool(s.sdk,
+		&sdk.Tool{
+			Name:        "inspect_manga",
+			Description: "Inspect a single .cbz archive: chapter count, comment coverage, archive width.",
+		},
+		func(ctx context.Context, req *sdk.CallToolRequest, in InspectMangaInput) (*sdk.CallToolResult, MangaEntry, error) {
+			entry, err := InspectManga(s.opts.Root, in.Name)
+			if err != nil {
+				return toolErr(MapError(err)), MangaEntry{}, nil
+			}
+			return nil, entry, nil
 		},
 	)
 }
