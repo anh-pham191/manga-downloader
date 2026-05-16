@@ -77,6 +77,19 @@ sentinels).
 Both paths share the same scraper and renderer; only the persistence
 layer differs (filesystem sentinel + folder vs. archive-as-state).
 
+**Which scenario runs when both folder *and* `.cbz` exist:**
+scenario A (the normal download/resume path) operates on chapter
+folders only and ignores any sibling `.cbz`. After scenario A
+finishes, re-run `package-cbz.sh` to bring the archive up to date.
+Scenario B (`--comments-only`) operates on `.cbz` only and does not
+touch chapter folders even if they exist. The two never overlap.
+
+**Comment ordering inside the rendered PNG:** page 1's comments
+first (top of the canvas), then page 2's, preserving the order the
+site returns them (which is approximately most-recent-first for
+page 1, then continuing). No reordering or de-duplication beyond
+"page 2 fetched separately from page 1".
+
 `package-cbz.sh` is updated to exclude `.comments.done` from new
 archives so the sentinel never leaks in. The `zzz-` prefix on the
 rendered PNG makes it sort last alphabetically, so any comic reader
@@ -132,11 +145,25 @@ A new `internal/comments/` package, plus a small reorganisation of
 the existing downloader to share its folder-naming logic:
 
 - **`internal/layout/`** (new) — extracted from
-  `internal/downloader/downloader.go`. Holds exported `Folder(num
-  string, maxNum string) string` and `FolderWidth(maxNum string) int`
-  helpers, so the downloader and the archive injector both use the
-  identical algorithm for mapping a chapter to its `chap-NNNN[-K]/`
-  folder name. The current `chapterFolder` becomes a thin wrapper.
+  `internal/downloader/downloader.go`. Holds exported helpers with
+  signatures that match the existing implementations exactly, so the
+  extraction is a straight move (not a redesign):
+
+  ```go
+  // Width returns the zero-padding width wide enough for the largest
+  // chapter number in the list, with a floor of 4.
+  func Width(chapters []site.Chapter) int
+
+  // Folder turns a published number like "227.5" into a
+  // filesystem-friendly, lexicographically-sortable name like
+  // <root>/chap-0227-5.
+  func Folder(root, number string, width int) string
+  ```
+
+  The downloader's existing `folderWidth` / `chapterFolder` become
+  one-line delegates. The archive injector calls `layout.Width` on
+  the freshly fetched `[]site.Chapter` and `layout.Folder("", num,
+  w)` per chapter to build the join key.
 - **`internal/comments/scraper.go`** — given a chapter URL + a
   `fetcher.Fetcher`, returns `[]Comment` for the first two pages.
   Reuses the existing fetcher (cookies, retries, jitter, Cloudflare
@@ -166,18 +193,26 @@ called after `.done` is written (the scenario-A entry point).
 
 ### Fetcher changes
 
-`internal/fetcher/fetcher.go` currently exposes a GET-only interface.
-The page-2 comments endpoint is `POST application/x-www-form-urlencoded`,
-so the interface gains a sibling:
+`internal/fetcher/fetcher.go` currently exposes a GET-only interface
+shaped around a `Request{URL, Referer}` / `*Response{Body,
+ContentType}` pair. The page-2 comments endpoint is
+`POST application/x-www-form-urlencoded`, so the interface gains a
+sibling that **mirrors** the existing shape rather than introducing
+a parallel `io.ReadCloser` style:
 
 ```go
-Post(ctx context.Context, url string, form url.Values) (io.ReadCloser, error)
+type Fetcher interface {
+    Get(ctx context.Context, req Request) (*Response, error)
+    Post(ctx context.Context, req Request, form url.Values) (*Response, error)
+}
 ```
 
-The HTTP implementation mirrors the existing `Get` (cookie jar,
-User-Agent, 3× retries on 429/5xx/dial, 200–500 ms jitter, and the
-`cf_clearance`-expiry 403 handling). The test fake gains the
-matching method.
+`Request.Referer` is reused — the AJAX endpoint's hot-link guard
+will likely reject requests with no Referer (the chapter page URL is
+the natural choice). The HTTP implementation mirrors the existing
+`Get` (cookie jar, User-Agent, 3× retries on 429/5xx/dial,
+200–500 ms jitter, and the `cf_clearance`-expiry 403 handling). The
+test fake gains the matching method.
 
 **Pre-implementation spike:** before merging, verify with one curl
 call that `POST /frontend/comment/list` with `cf_clearance` cookie
@@ -263,7 +298,10 @@ but no `.comments.done` triggers the same branch on the next
 **Scenario B — `--comments-only`, archive-only state:**
 
 ```
-chapters, err := site.ListChapters(ctx, mangaURL, fetcher)  // existing
+// site.ListChapters returns chapters sorted ascending by number
+// (verified in internal/site/source/site.go); the last element is
+// therefore the maximum.
+chapters, err := site.ListChapters(ctx, mangaURL, fetcher)
 maxNum := chapters[len(chapters)-1].Number
 foldersByURL := map[folder]url{}
 for _, c := range chapters:
@@ -328,9 +366,13 @@ Two real complications that the v1 draft hand-waved:
    `1F468 200D 1F469 200D 1F467`) and skin-tone modifiers
    (`👍🏽` = `1F44D 1F3FD`) are *one* visual glyph but multiple
    codepoints. Iteration must use grapheme-cluster segmentation via
-   **`github.com/rivo/uniseg`**, then longest-match against the
-   Twemoji bundle by `-`-joined hex codepoint string. Missing
-   variation selectors (FE0F) are stripped before lookup.
+   **`github.com/rivo/uniseg`**. The lookup order per cluster is:
+   (a) NFC-normalise body text once up-front (preserves FE0F); then
+   (b) per cluster, strip FE0F variation selectors before building
+   the `-`-joined hex codepoint string used as the Twemoji filename
+   key. Twemoji's bundle does not include FE0F in filenames, so the
+   strip must happen at lookup time even though NFC leaves FE0F in
+   place.
 
 ### De-risk gate (before adopting pure-Go for real)
 
@@ -338,7 +380,7 @@ Before wiring the renderer into the downloader, the plan builds a
 single throwaway test:
 
 ```
-TestRenderFixture_ShapingAndEmoji_GoldenPNG
+TestRenderFixture_ShapingAndEmoji
 ```
 
 It renders one fixture comment list containing:
@@ -349,11 +391,38 @@ It renders one fixture comment list containing:
 - A plain BMP emoji (`😀`)
 - Mixed Latin + Vietnamese in one line to exercise the shaper
 
-If this test cannot be made to pass in pure Go within ~one day's
-implementation effort, the renderer falls back to **headless Chrome**
-(HTML template → `chrome --headless --screenshot`). That is uglier
-operationally but renders correctly the first time. This is an
-explicit pre-commit gate in the implementation plan.
+**Assertions are structural, not byte-exact.** Antialiasing and
+freetype-hinting outputs drift across Go versions and build flags,
+so a byte-exact golden PNG would be perpetually flaky. The test
+instead asserts:
+
+- The output is a non-empty, valid PNG (decode round-trip succeeds).
+- One distinct glyph region per grapheme cluster on each line,
+  detected via run-length scanning of non-background pixels. Catches
+  ZWJ sequences that render as separate emoji instead of one.
+- Twemoji-sourced regions are colour (saturation above a threshold);
+  text-sourced regions are near-monochrome. Catches the
+  emoji-as-`.notdef`-tofu failure mode.
+- No row of pixels in body text shows the stacked-mark signature of
+  broken Vietnamese diacritic positioning.
+
+If `go-text/typesetting` cannot be made to pass these within ~one
+day — and that's an *optimistic* budget; the library is mature for
+Latin but the mixed-script + bitmap-emoji-fallback combination is
+less exercised — the renderer falls back to **headless Chrome**:
+
+```
+chrome --headless=new --disable-gpu \
+       --screenshot=out.png \
+       --window-size=1000,<H> \
+       file:///tmp/render-<uuid>.html
+```
+
+`--headless=new` is the modern flag; the older `--headless` still
+works but is being phased out. Local `file://` HTML has no CSP
+concerns for our own rendered template. The renderer's public API
+(`Render([]Comment, io.Writer) error`) stays the same, so a
+fallback swap doesn't ripple into the rest of the design.
 
 ### Bidi (deferred)
 
@@ -414,21 +483,39 @@ two problems:
 The implementation therefore uses a **stage-and-rename** pattern,
 once per manga, not per chapter:
 
-1. Create `<name>.cbz.tmp` as a fresh archive.
+1. Create `<name>.cbz.tmp` **in the same directory as the target
+   `.cbz`** (i.e. alongside the manga, not in `$TMPDIR`). `os.Rename`
+   is only atomic within a filesystem; co-locating the tmp with the
+   target guarantees that property. If an existing
+   `<name>.cbz.tmp` is present (orphaned from a prior killed run),
+   overwrite it — `os.Create` does that already.
 2. Stream every entry from the original `.cbz` into the tmp via
-   `archive/zip` (`Writer.CreateRaw` + `io.Copy`) — no decompression,
-   no re-deflation. Existing entries are byte-identical regions
-   copied straight through. The original `.cbz` is store-mode, so
-   this is essentially an `io.Copy` of each compressed payload at
-   memory-bandwidth speed.
+   `archive/zip` with no decompression cycle:
+
+   ```
+   for _, f := range zr.File:
+       rc, _ := f.OpenRaw()                  // undecompressed bytes
+       hdr := f.FileHeader                   // preserves method,
+                                              // CRC32, sizes, name
+       w, _ := zw.CreateRaw(&hdr)            // raw mode: no recompute
+       io.Copy(w, rc)
+   ```
+
+   `CreateRaw` requires `CRC32`, `CompressedSize64`, and
+   `UncompressedSize64` to already be populated on the header —
+   `f.FileHeader` already has them, so the field-by-field copy is
+   trivial. This is essential: using `Open()` + `Create()` would
+   decompress and re-deflate every existing entry, turning a few
+   seconds into many minutes on a 6 GB archive.
 3. Append the newly rendered `chap-NNNN[-K]/zzz-comments.png`
-   entries with `Method = zip.Store` (compress level 0) to match
-   the rest of the archive.
-4. Close the writer (this writes the CD).
+   entries with `Method = zip.Store` (compression level 0) to match
+   the rest of the archive. PNG is already compressed; deflating it
+   again wastes CPU for under 1% size reduction.
+4. Close the writer (this writes the central directory).
 5. Exec `unzip -t <name>.cbz.tmp` (returns 0 on a healthy archive)
    as a cheap verification.
 6. `os.Rename(<name>.cbz.tmp, <name>.cbz)` — atomic on the same
-   filesystem.
+   filesystem (guaranteed by step 1's placement choice).
 7. On any failure between (1) and (6), delete the tmp and exit
    with a clear error. The original `<name>.cbz` is never mutated.
 
@@ -483,7 +570,7 @@ archive in Go directly (see "Safe archive update").
   cover the new `Post` method — retries on 5xx, 403 surfaces as
   Cloudflare-expiry, cookies and UA are sent.
 - **Renderer de-risk test** (gate): the
-  `TestRenderFixture_ShapingAndEmoji_GoldenPNG` test described in
+  `TestRenderFixture_ShapingAndEmoji` test described in
   "De-risk gate" above. Must pass before any of the sync code is
   written.
 - **Renderer unit tests**: long-body wrapping, very long usernames,
@@ -515,7 +602,11 @@ archive in Go directly (see "Safe archive update").
   on hi-DPI displays, bump to 2× — trivial change later.
 - **No-comments PNG.** Currently we render nothing for chapters with
   zero comments. Open to changing this if you'd prefer a tiny "No
-  comments" marker page for consistency.
+  comments" marker page for consistency. **Side effect of leaving
+  this off:** scenario B has no sentinel for zero-comment chapters,
+  so every `--comments-only` run re-scrapes them (one cheap GET per
+  chapter, no AJAX POST). For ~15 manga × hundreds of chapters
+  that's bounded and fine; revisit only if it becomes noticeable.
 - **Headless-Chrome fallback for rendering.** Gated behind the
   de-risk test (see "De-risk gate"). If the pure-Go shaping path
   cannot pass the fixture test within ~one day, swap the renderer
