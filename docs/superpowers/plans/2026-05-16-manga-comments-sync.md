@@ -110,14 +110,14 @@ EP=738316
 curl -sS -o /tmp/cf-spike.html -w "HTTP %{http_code}\nContent-Length: %{size_download}\n" \
   -A "$UA" \
   -H "Cookie: cf_clearance=$CF" \
-  -H "Referer: https://truyenqqko.com/truyen-tranh/hoc-vien-one-piece-13680-chap-1" \
+  -H "Referer: https://<source-site>/truyen-tranh/hoc-vien-one-piece-13680-chap-1" \
   -H "X-Requested-With: XMLHttpRequest" \
   --data-urlencode "book_id=$BOOK" \
   --data-urlencode "parent_id=0" \
   --data-urlencode "page=2" \
   --data-urlencode "episode_id=$EP" \
   --data-urlencode "team_id=0" \
-  "https://truyenqqko.com/frontend/comment/list"
+  "https://<source-site>/frontend/comment/list"
 
 echo
 head -c 400 /tmp/cf-spike.html
@@ -975,7 +975,7 @@ mkdir -p internal/comments/testdata
 UA=$(jq -r .user_agent "$HOME/Library/Application Support/downloader/cookies.json")
 CF=$(jq -r '.cookies[0].value' "$HOME/Library/Application Support/downloader/cookies.json")
 curl -s -A "$UA" -H "Cookie: cf_clearance=$CF" \
-  "https://truyenqqko.com/truyen-tranh/hoc-vien-one-piece-13680-chap-1" \
+  "https://<source-site>/truyen-tranh/hoc-vien-one-piece-13680-chap-1" \
   -o internal/comments/testdata/chapter-with-comments.html
 wc -c internal/comments/testdata/chapter-with-comments.html
 ```
@@ -1016,7 +1016,7 @@ func TestScrape_Page1FromChapterHTML(t *testing.T) {
     }
     f := &fixedFetcher{getBody: raw, postBody: nil}
 
-    cs, err := Scrape(context.Background(), "https://truyenqqko.com/truyen-tranh/hoc-vien-one-piece-13680-chap-1", f)
+    cs, err := Scrape(context.Background(), "https://<source-site>/truyen-tranh/hoc-vien-one-piece-13680-chap-1", f)
     if err != nil {
         t.Fatal(err)
     }
@@ -1103,7 +1103,7 @@ func Scrape(ctx context.Context, chapterURL string, f fetcher.Fetcher) ([]Commen
             "team_id":    {"0"},
         }
         p2resp, err := f.Post(ctx, fetcher.Request{
-            URL:     "https://truyenqqko.com/frontend/comment/list",
+            URL:     "https://<source-site>/frontend/comment/list",
             Referer: chapterURL,
         }, form)
         if err == nil && len(p2resp.Body) > 0 {
@@ -1306,12 +1306,12 @@ UA=$(jq -r .user_agent "$HOME/Library/Application Support/downloader/cookies.jso
 CF=$(jq -r '.cookies[0].value' "$HOME/Library/Application Support/downloader/cookies.json")
 BOOK=13680; EP=738316
 curl -s -A "$UA" -H "Cookie: cf_clearance=$CF" \
-  -H "Referer: https://truyenqqko.com/truyen-tranh/hoc-vien-one-piece-13680-chap-1" \
+  -H "Referer: https://<source-site>/truyen-tranh/hoc-vien-one-piece-13680-chap-1" \
   -H "X-Requested-With: XMLHttpRequest" \
   --data-urlencode "book_id=$BOOK" --data-urlencode "parent_id=0" \
   --data-urlencode "page=2" --data-urlencode "episode_id=$EP" --data-urlencode "team_id=0" \
   -o internal/comments/testdata/page2-fragment.html \
-  "https://truyenqqko.com/frontend/comment/list"
+  "https://<source-site>/frontend/comment/list"
 wc -c internal/comments/testdata/page2-fragment.html
 ```
 
@@ -1406,7 +1406,7 @@ curl -L -o twemoji-15.1.0.tar.gz \
 tar -xzf twemoji-15.1.0.tar.gz
 ls twemoji-15.1.0/assets/72x72/ | head -5
 
-cd /Users/anhpham/Documents/Projects/script/downloader
+cd <absolute-path-to-repo>
 mkdir -p internal/comments/assets/twemoji
 cp /tmp/twemoji-15.1.0/assets/72x72/*.png internal/comments/assets/twemoji/
 ls internal/comments/assets/twemoji/ | wc -l
@@ -3249,7 +3249,7 @@ Expected: usage prints.
 ```bash
 ./bin/downloader sync-comments \
   --name "Slam Dunk" \
-  https://truyenqqko.com/truyen-tranh/cao-thu-bong-ro-remake-14065
+  https://<source-site>/truyen-tranh/cao-thu-bong-ro-remake-14065
 ```
 
 Expected: scans the existing `Slam Dunk.cbz`, backfills comment PNGs, archive grows by a few MB.
@@ -3400,8 +3400,8 @@ Expected: zero output from `gofmt -l .`; PASS for everything.
 
 Then perform an end-to-end manual smoke test:
 
-1. `bin/downloader sync-manga --name "Test" https://truyenqqko.com/...` — fresh archive created.
-2. `bin/downloader sync-comments --name "Test" https://truyenqqko.com/...` — backfills present chapters; archive grows.
+1. `bin/downloader sync-manga --name "Test" https://<source-site>/...` — fresh archive created.
+2. `bin/downloader sync-comments --name "Test" https://<source-site>/...` — backfills present chapters; archive grows.
 3. Two concurrent invocations: second fails fast with "another downloader is running."
 4. Kill mid-run, re-invoke: `.ok`-marked subdirs survive; work is not redone.
 

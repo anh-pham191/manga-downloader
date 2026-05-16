@@ -96,7 +96,7 @@ A v1 release is accepted when **all** of the following hold:
 | H6 | Token-expiry error gets buried as generic failure | Tool wrapper checks `errors.Is(err, fetcher.ErrCloudflareExpired)` first and maps to `CF_TOKEN_EXPIRED` with a recovery instruction in the error message; tested. |
 | H7 | Claude Desktop crashes / disconnects mid-sync | Server detects stdin EOF (SDK does this), cancels the active context, lets the pipeline write its scratch `.ok` markers, exits cleanly. Re-running picks up where it left off. |
 | H8 | Wrong cookie file path on a teammate's machine | `mcp` subcommand accepts `--cookies` and `--root` flags; the Claude Desktop config block in the README shows how to set them. Default mirrors the CLI default. |
-| H9 | User asks for a sync of a manga the cookie was never refreshed for | `update_cookie` accepts an optional `domain` parameter; default is the existing entry's domain or `.truyenqqko.com`. Documented. |
+| H9 | User asks for a sync of a manga the cookie was never refreshed for | `update_cookie` accepts an optional `domain` parameter; default is the existing entry's domain or `.<source-site>`. Documented. |
 
 ## 5. Architecture
 
@@ -293,7 +293,7 @@ Sample `claude_desktop_config.json` block (will live in README):
 {
   "mcpServers": {
     "manga-downloader": {
-      "command": "/Users/anhpham/Documents/Projects/script/downloader/bin/downloader",
+      "command": "<absolute-path-to-repo>/bin/downloader",
       "args": ["mcp"]
     }
   }
