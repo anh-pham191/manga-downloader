@@ -12,8 +12,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	gtfont "github.com/go-text/typesetting/font"
 	"github.com/go-text/typesetting/di"
+	gtfont "github.com/go-text/typesetting/font"
 	"github.com/go-text/typesetting/language"
 	"github.com/go-text/typesetting/shaping"
 	"github.com/rivo/uniseg"

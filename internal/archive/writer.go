@@ -123,27 +123,41 @@ func StageAndRename(cbzPath, scratchRoot string) error {
 func readMarkedChapters(scratchRoot string) ([]string, error) {
 	var chs []string
 	err := filepath.WalkDir(scratchRoot, func(p string, d fs.DirEntry, err error) error {
-		if err != nil { return err }
-		if !d.IsDir() || p == scratchRoot { return nil }
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() || p == scratchRoot {
+			return nil
+		}
 		rel, _ := filepath.Rel(scratchRoot, p)
-		if filepath.Dir(rel) != "." { return nil } // only first level
+		if filepath.Dir(rel) != "." {
+			return nil
+		} // only first level
 		if _, err := os.Stat(filepath.Join(p, ".ok")); err == nil {
 			chs = append(chs, rel)
 		}
 		return nil
 	})
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return chs, nil
 }
 
 func verifyArchive(path string) error {
 	zr, err := zip.OpenReader(path)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer zr.Close()
 	for _, f := range zr.File {
 		rc, err := f.OpenRaw()
-		if err != nil { return err }
-		if _, err := io.Copy(io.Discard, rc); err != nil { return err }
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(io.Discard, rc); err != nil {
+			return err
+		}
 	}
 	return nil
 }
