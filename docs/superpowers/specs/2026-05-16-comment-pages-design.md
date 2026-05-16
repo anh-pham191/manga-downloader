@@ -406,29 +406,31 @@ instead asserts:
 - No row of pixels in body text shows the stacked-mark signature of
   broken Vietnamese diacritic positioning.
 
-If `go-text/typesetting` cannot be made to pass these within ~one
-day — and that's an *optimistic* budget; the library is mature for
-Latin but the mixed-script + bitmap-emoji-fallback combination is
-less exercised — the renderer falls back to **headless Chrome**:
+**If pure Go can't make these pass, we accept degraded emoji
+output.** The body-text shaping (Vietnamese diacritics) is the
+load-bearing requirement; emoji are decoration. If
+`go-text/typesetting` + the Twemoji bundle can't render a particular
+class of emoji (e.g. ZWJ family sequences) correctly, the renderer
+falls back to drawing the raw codepoint glyph via Noto (which gives
+a tofu box) or simply omitting the cluster. Vietnamese text MUST
+render correctly; emoji are best-effort. No headless-browser
+fallback — the project stays a single pure-Go binary.
 
-```
-chrome --headless=new --disable-gpu \
-       --screenshot=out.png \
-       --window-size=1000,<H> \
-       file:///tmp/render-<uuid>.html
-```
+The de-risk test is therefore split into two assertions of
+different strictness:
 
-`--headless=new` is the modern flag; the older `--headless` still
-works but is being phased out. Local `file://` HTML has no CSP
-concerns for our own rendered template. The renderer's public API
-(`Render([]Comment, io.Writer) error`) stays the same, so a
-fallback swap doesn't ripple into the rest of the design.
+- **Required (gate):** Vietnamese composed/decomposed renders
+  correctly (no stacked marks); plain BMP emoji renders as a
+  coloured glyph or tofu (but does not crash the renderer).
+- **Best-effort (warn, don't fail):** ZWJ sequences and skin-tone
+  modifiers render as one cluster. Failure here logs a warning but
+  the test passes.
 
 ### Bidi (deferred)
 
 Vietnamese is LTR Latin, so RTL bidi is moot in practice. If a
-commenter pastes Arabic/Hebrew we accept visual mojibake — this is
-explicitly out of scope and logged in the fallback decision.
+commenter pastes Arabic/Hebrew we accept visual mojibake — explicitly
+out of scope.
 
 ## Concurrency
 
@@ -607,10 +609,3 @@ archive in Go directly (see "Safe archive update").
   so every `--comments-only` run re-scrapes them (one cheap GET per
   chapter, no AJAX POST). For ~15 manga × hundreds of chapters
   that's bounded and fine; revisit only if it becomes noticeable.
-- **Headless-Chrome fallback for rendering.** Gated behind the
-  de-risk test (see "De-risk gate"). If the pure-Go shaping path
-  cannot pass the fixture test within ~one day, swap the renderer
-  implementation to `chrome --headless --screenshot` against an
-  HTML template. Public API of `renderer.go` (input: `[]Comment`,
-  output: PNG bytes) stays the same — only the implementation
-  changes — so the rest of the design is unaffected.
