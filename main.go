@@ -5,42 +5,49 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/url"
 	"os"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"strings"
-	"syscall"
 
-	"github.com/anhpham/downloader/internal/downloader"
 	"github.com/anhpham/downloader/internal/fetcher"
+	"github.com/anhpham/downloader/internal/pipeline"
 	sourcesite "github.com/anhpham/downloader/internal/site/source"
 )
 
 func main() {
-	out := flag.String("out", defaultOutDir(), "directory to write chapter folders into")
-	concurrency := flag.Int("concurrency", 4, "chapters in flight at once")
-	from := flag.Int("from", 0, "first chapter to download (0 = no lower bound)")
-	to := flag.Int("to", 0, "last chapter to download (0 = no upper bound)")
-	resume := flag.Bool("resume", false, "skip chapters whose folder already contains .done")
-	verbose := flag.Bool("verbose", false, "print per-chapter progress to stderr")
-	cookiesPath := flag.String("cookies", defaultCookiesPath(), "path to JSON cookie file (see README)")
-	name := flag.String("name", "", "manga folder name (defaults to the URL slug)")
-	flag.Usage = usage
-	flag.Parse()
-
-	if flag.NArg() != 1 {
+	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
-	mangaURL := flag.Arg(0)
+	mode, ok := parseMode(os.Args[1])
+	if !ok {
+		usage()
+		os.Exit(2)
+	}
+
+	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
+	out := fs.String("out", defaultOutDir(), "root directory for .cbz archives")
+	concurrency := fs.Int("concurrency", 4, "chapters in flight")
+	from := fs.Int("from", 0, "first chapter number (0 = no lower bound)")
+	to := fs.Int("to", 0, "last chapter number (0 = no upper bound)")
+	verbose := fs.Bool("verbose", false, "per-chapter progress to stderr")
+	cookiesPath := fs.String("cookies", defaultCookiesPath(), "path to cookie JSON")
+	name := fs.String("name", "", "archive name (defaults to URL slug)")
+	fs.Usage = usage
+	fs.Parse(os.Args[2:]) //nolint:errcheck // ExitOnError handles errors
+
+	if fs.NArg() != 1 {
+		usage()
+		os.Exit(2)
+	}
+	mangaURL := fs.Arg(0)
 
 	slug, err := slugFromURL(mangaURL)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "invalid manga url:", err)
+		fmt.Fprintln(os.Stderr, "invalid url:", err)
 		os.Exit(2)
 	}
 	if *name != "" {
@@ -53,71 +60,78 @@ func main() {
 			printCookieInstructions(*cookiesPath)
 			os.Exit(2)
 		}
-		fmt.Fprintln(os.Stderr, "load cookies:", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-
 	f, err := fetcher.New(cf, fetcher.Options{})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fetcher setup failed:", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	site := &sourcesite.Site{Fetcher: f}
 
-	logOut := io.Discard
-	if *verbose {
-		logOut = os.Stderr
-	}
-	logger := log.New(logOut, "", log.LstdFlags)
-
-	d := &downloader.Downloader{
-		Site:        &sourcesite.Site{Fetcher: f},
-		Fetcher:     f,
-		OutDir:      *out,
-		MangaSlug:   slug,
-		Concurrency: *concurrency,
+	err = pipeline.Run(context.Background(), pipeline.Opts{
+		Mode:        mode,
+		MangaURL:    mangaURL,
+		Root:        *out,
+		Name:        slug,
 		From:        *from,
 		To:          *to,
-		Resume:      *resume,
-		Logger:      logger,
-	}
-
-	res, err := d.Run(ctx, mangaURL)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "run failed:", err)
-		if errors.Is(err, fetcher.ErrCloudflareExpired) {
-			fmt.Fprintln(os.Stderr, "→ refresh cf_clearance in", *cookiesPath, "and re-run with --resume")
-		}
+		Concurrency: *concurrency,
+		Site:        site,
+		Fetcher:     f,
+		Verbose:     *verbose,
+		Logger:      log.New(os.Stderr, "", 0),
+	})
+	switch {
+	case err == nil:
+		return
+	case errors.Is(err, pipeline.ErrAnotherInstance):
+		fmt.Fprintln(os.Stderr, "another downloader is running for", slug)
 		os.Exit(2)
-	}
-
-	fmt.Fprintf(os.Stderr, "Done: %d completed, %d skipped, %d failed.\n", res.Completed, res.Skipped, res.Failed)
-	expired := false
-	for _, fail := range res.Failures {
-		fmt.Fprintf(os.Stderr, "  chap %s: %v\n", fail.Number, fail.Err)
-		if errors.Is(fail.Err, fetcher.ErrCloudflareExpired) {
-			expired = true
-		}
-	}
-	if expired {
-		fmt.Fprintln(os.Stderr, "→ refresh cf_clearance in", *cookiesPath, "and re-run with --resume")
-	}
-	if res.Failed > 0 {
+	case errors.Is(err, pipeline.ErrNoArchive):
+		fmt.Fprintln(os.Stderr,
+			"no archive at", *out+"/"+slug+".cbz",
+			"— run `downloader sync-manga` first")
+		os.Exit(0)
+	case errors.Is(err, fetcher.ErrCloudflareExpired):
+		fmt.Fprintln(os.Stderr,
+			"→ refresh cf_clearance in", *cookiesPath,
+			"and re-run with `resume` or `sync-manga`")
+		os.Exit(1)
+	default:
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
+func parseMode(s string) (pipeline.Mode, bool) {
+	switch s {
+	case "sync-comments":
+		return pipeline.SyncComments, true
+	case "resume":
+		return pipeline.Resume, true
+	case "sync-manga":
+		return pipeline.SyncManga, true
+	}
+	return 0, false
+}
+
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: downloader [flags] <manga-url>
+	fmt.Fprintln(os.Stderr, `usage:
+  downloader sync-manga    [flags] <manga-url>   download new chapters + comments + backfill missing comments
+  downloader resume        [flags] <manga-url>   download new chapters + comments (no backfill)
+  downloader sync-comments [flags] <manga-url>   backfill comments on existing archive (no new chapters)
 
-Mirrors a manga from the configured source site to local disk. Each chapter
-becomes one folder under <out>/<manga-slug>/.
-
-Flags:
-`)
-	flag.PrintDefaults()
+flags:
+  --out string           root directory (default: ~/Documents/Manga)
+  --name string          archive name (default: URL slug)
+  --concurrency int      chapters in flight (default 4)
+  --from int             first chapter
+  --to int               last chapter
+  --cookies string       path to cookie JSON
+  --verbose              per-chapter progress`)
 }
 
 func defaultOutDir() string {
@@ -172,6 +186,6 @@ To create one:
   }
 
 The cookie usually lasts a few hours. When it expires you'll see a
-403 — refresh "cf_clearance" the same way and re-run with --resume.
+403 — refresh "cf_clearance" the same way and re-run with resume or sync-manga.
 `, p)
 }
