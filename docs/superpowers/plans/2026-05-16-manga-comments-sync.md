@@ -730,55 +730,71 @@ git commit -m "downloader: delegate folder naming to internal/layout"
 
 ## Task 4: Fetcher Post method
 
-Add a POST method to the Fetcher interface and HTTP implementation that mirrors the existing GET path.
+Add a POST method to the Fetcher interface and HTTP implementation. The real existing code (`internal/fetcher/http.go`) is structured as:
+
+- `HTTPFetcher{ client *http.Client, userAgent string, maxAttempts int, minDelay, maxDelay time.Duration }` — note: cookies live inside `client.Jar` (a `*cookiejar.Jar`), not as a separate field.
+- `New(cf *CookieFile, opts Options) (*HTTPFetcher, error)` — public constructor.
+- `Get` wraps a retry loop around an internal `attempt(ctx, req Request) (*Response, error)` helper.
+- `httpStatusError`, `shouldRetry`, `jitter` are the supporting helpers.
+- `ErrCloudflareExpired` exists and is the 403 sentinel.
+
+The cookie type is `CookieRecord`, not `Cookie`.
 
 **Files:**
-- Modify: `internal/fetcher/fetcher.go`
-- Modify: `internal/fetcher/<existing http impl>.go` (run `ls internal/fetcher/` first to find the file — it may be named `http.go` or `chrome.go` per the package comment).
-- Modify: `internal/fetcher/<existing>_test.go`
+- Modify: `internal/fetcher/fetcher.go` (interface)
+- Modify: `internal/fetcher/http.go` (impl — share the retry shape with Get)
+- Create: `internal/fetcher/http_test.go` (if not present)
 
-- [ ] **Step 1: Locate the existing GET implementation**
-
-```bash
-ls internal/fetcher/
-grep -n 'func.*Get\b' internal/fetcher/*.go
-```
-
-Note the filename and the GET function — Post will live in the same file and share its retry/cookie/UA helpers.
-
-- [ ] **Step 2: Write a failing test for Post**
+- [ ] **Step 1: Write a failing test for Post**
 
 ```go
-// Add to internal/fetcher/<existing>_test.go
+// internal/fetcher/http_test.go
+package fetcher
 
-func TestPost_SendsFormAndCookies(t *testing.T) {
-    var sawBody, sawCookie, sawReferer, sawUA string
+import (
+    "context"
+    "errors"
+    "io"
+    "net/http"
+    "net/http/httptest"
+    "net/url"
+    "strings"
+    "testing"
+)
+
+func TestPost_SendsFormAndCookieAndReferer(t *testing.T) {
+    var sawBody, sawCookie, sawReferer, sawUA, sawCT string
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         b, _ := io.ReadAll(r.Body)
         sawBody = string(b)
         sawCookie = r.Header.Get("Cookie")
         sawReferer = r.Header.Get("Referer")
         sawUA = r.Header.Get("User-Agent")
+        sawCT = r.Header.Get("Content-Type")
         w.Header().Set("Content-Type", "text/html")
         _, _ = w.Write([]byte("<article class=\"info-comment\"></article>"))
     }))
     defer srv.Close()
 
-    f := newHTTPFetcher(CookieFile{
+    // The cookie domain must be left empty so the in-memory jar
+    // attaches the cookie to the test server's 127.0.0.1 host.
+    cf := &CookieFile{
         UserAgent: "test-agent",
-        Cookies: []Cookie{{Name: "cf_clearance", Value: "TOKEN", Domain: ".example.com"}},
-    })
-
-    resp, err := f.Post(context.Background(), Request{URL: srv.URL, Referer: "https://example.com/page"}, url.Values{
-        "book_id": {"13680"}, "page": {"2"},
-    })
-    if err != nil {
-        t.Fatalf("Post: %v", err)
+        Cookies:   []CookieRecord{{Name: "cf_clearance", Value: "TOKEN"}},
     }
+    f, err := New(cf, Options{})
+    if err != nil { t.Fatal(err) }
+
+    resp, err := f.Post(context.Background(),
+        Request{URL: srv.URL, Referer: "https://example.com/page"},
+        url.Values{"book_id": {"13680"}, "page": {"2"}})
+    if err != nil { t.Fatalf("Post: %v", err) }
+
     if !strings.Contains(string(resp.Body), "info-comment") {
         t.Errorf("body = %q", resp.Body)
     }
-    if !strings.Contains(sawBody, "book_id=13680") || !strings.Contains(sawBody, "page=2") {
+    if !strings.Contains(sawBody, "book_id=13680") ||
+        !strings.Contains(sawBody, "page=2") {
         t.Errorf("server saw body = %q", sawBody)
     }
     if !strings.Contains(sawCookie, "cf_clearance=TOKEN") {
@@ -790,6 +806,9 @@ func TestPost_SendsFormAndCookies(t *testing.T) {
     if sawUA != "test-agent" {
         t.Errorf("server saw UA = %q", sawUA)
     }
+    if !strings.HasPrefix(sawCT, "application/x-www-form-urlencoded") {
+        t.Errorf("server saw content-type = %q", sawCT)
+    }
 }
 
 func TestPost_403IsCloudflareExpiry(t *testing.T) {
@@ -798,70 +817,106 @@ func TestPost_403IsCloudflareExpiry(t *testing.T) {
     }))
     defer srv.Close()
 
-    f := newHTTPFetcher(CookieFile{UserAgent: "ua"})
-    _, err := f.Post(context.Background(), Request{URL: srv.URL}, url.Values{})
-    if err == nil || !errors.Is(err, ErrCloudflareExpired) {
+    f, err := New(&CookieFile{UserAgent: "ua", Cookies: []CookieRecord{{Name: "x", Value: "y"}}}, Options{})
+    if err != nil { t.Fatal(err) }
+    _, err = f.Post(context.Background(), Request{URL: srv.URL}, url.Values{})
+    if !errors.Is(err, ErrCloudflareExpired) {
         t.Fatalf("err = %v, want ErrCloudflareExpired", err)
     }
 }
 ```
 
-(If `newHTTPFetcher` or `ErrCloudflareExpired` are named differently in the existing code, adjust the test to match.)
+If `CookieFile` rejects an empty cookie list (see `LoadCookieFile`: "no cookies defined"), bypass that validation in the test by constructing `&CookieFile{...}` directly instead of going through `LoadCookieFile` — which is what the test above does.
 
-- [ ] **Step 3: Run the tests to verify they fail**
+- [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
 go test ./internal/fetcher/ -run TestPost -v
 ```
 
-Expected: FAIL — Post does not exist on the Fetcher.
+Expected: FAIL — `(*HTTPFetcher).Post` does not exist.
 
-- [ ] **Step 4: Add Post to the interface**
+- [ ] **Step 3: Add Post to the interface**
 
 ```go
 // internal/fetcher/fetcher.go
+package fetcher
 
 import (
     "context"
     "net/url"
 )
 
-// Fetcher fetches one URL at a time. Implementations are expected
-// to handle their own retries, jitter, and rate limiting; callers
-// treat each call as a single all-or-nothing operation.
+type Request struct {
+    URL     string
+    Referer string
+}
+
+type Response struct {
+    Body        []byte
+    ContentType string
+}
+
 type Fetcher interface {
     Get(ctx context.Context, req Request) (*Response, error)
     Post(ctx context.Context, req Request, form url.Values) (*Response, error)
 }
 ```
 
-- [ ] **Step 5: Implement Post in the HTTP fetcher**
+- [ ] **Step 4: Implement Post on HTTPFetcher**
 
-In the existing HTTP fetcher file, add:
+Add to `internal/fetcher/http.go`. The structure mirrors `Get`: a public method that runs the retry loop around an internal `postAttempt` helper parallel to `attempt`.
 
 ```go
+// Add to internal/fetcher/http.go
+
+import "net/url" // add to the existing import block
+
 // Post issues a POST application/x-www-form-urlencoded request to
-// req.URL. It mirrors Get's cookie/UA/retry/jitter/CF-403 handling.
-func (f *httpFetcher) Post(ctx context.Context, req Request, form url.Values) (*Response, error) {
+// req.URL. Cookie jar, User-Agent, retries, and Cloudflare-403
+// handling mirror Get.
+func (h *HTTPFetcher) Post(ctx context.Context, req Request, form url.Values) (*Response, error) {
+    var lastErr error
+    for attempt := 1; attempt <= h.maxAttempts; attempt++ {
+        resp, err := h.postAttempt(ctx, req, form)
+        if err == nil {
+            h.jitter()
+            return resp, nil
+        }
+        lastErr = err
+        if !shouldRetry(err) || attempt == h.maxAttempts {
+            break
+        }
+        wait := time.Duration(1<<(attempt-1)) * 500 * time.Millisecond
+        select {
+        case <-ctx.Done():
+            return nil, ctx.Err()
+        case <-time.After(wait):
+        }
+    }
+    return nil, lastErr
+}
+
+func (h *HTTPFetcher) postAttempt(ctx context.Context, req Request, form url.Values) (*Response, error) {
     body := strings.NewReader(form.Encode())
     httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, req.URL, body)
     if err != nil {
-        return nil, fmt.Errorf("build POST: %w", err)
+        return nil, fmt.Errorf("build POST request: %w", err)
     }
     httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
     httpReq.Header.Set("X-Requested-With", "XMLHttpRequest")
-    httpReq.Header.Set("User-Agent", f.userAgent)
+    httpReq.Header.Set("Accept", "text/html, */*; q=0.01")
+    httpReq.Header.Set("Accept-Language", "en-US,en;q=0.9")
+    httpReq.Header.Set("User-Agent", h.userAgent)
     if req.Referer != "" {
         httpReq.Header.Set("Referer", req.Referer)
     }
-    for _, c := range f.cookies {
-        httpReq.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
-    }
+    // Cookies come from h.client.Jar — http.Client.Do attaches them
+    // automatically using the URL of the outgoing request. No
+    // explicit AddCookie is needed (or correct: the jar would not
+    // attach cookies whose Domain doesn't match req.URL's host).
 
-    // Reuse the retry helper from Get. If the existing fetcher uses
-    // a `doWithRetry(req)` method, call it; otherwise inline the
-    // 3x retry + jitter loop here.
-    resp, err := f.doWithRetry(httpReq)
+    resp, err := h.client.Do(httpReq)
     if err != nil {
         return nil, err
     }
@@ -870,8 +925,11 @@ func (f *httpFetcher) Post(ctx context.Context, req Request, form url.Values) (*
     if resp.StatusCode == http.StatusForbidden {
         return nil, ErrCloudflareExpired
     }
-    if resp.StatusCode >= 400 {
-        return nil, fmt.Errorf("POST %s: HTTP %d", req.URL, resp.StatusCode)
+    if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+        return nil, &httpStatusError{Status: resp.StatusCode}
+    }
+    if resp.StatusCode != http.StatusOK {
+        return nil, fmt.Errorf("unexpected status %d for POST %s", resp.StatusCode, req.URL)
     }
     raw, err := io.ReadAll(resp.Body)
     if err != nil {
@@ -881,31 +939,17 @@ func (f *httpFetcher) Post(ctx context.Context, req Request, form url.Values) (*
 }
 ```
 
-(Adjust field names — `f.userAgent`, `f.cookies`, `f.doWithRetry` — to match the existing implementation. Read 20 lines of the existing `Get` to see the conventions before pasting.)
+Add `"strings"` to the existing `import` block at the top of `http.go` if it isn't already present. `httpStatusError`, `shouldRetry`, and `jitter` are already defined further down the file.
 
-- [ ] **Step 6: If there's a test fake, add Post there too**
-
-```bash
-grep -n 'type fakeFetcher\|type Fake' internal/ -r
-```
-
-If a fake exists, add:
-
-```go
-func (f *fakeFetcher) Post(ctx context.Context, req fetcher.Request, form url.Values) (*fetcher.Response, error) {
-    return f.responses[req.URL], nil // or whatever pattern the fake uses
-}
-```
-
-- [ ] **Step 7: Run all tests**
+- [ ] **Step 5: Run the tests to verify they pass**
 
 ```bash
-go test ./...
+go test ./internal/fetcher/ -v
 ```
 
-Expected: PASS, including the new Post tests.
+Expected: PASS for both `TestPost_*`. Existing `Get` tests should still PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add internal/fetcher/
@@ -947,6 +991,7 @@ package comments
 import (
     "context"
     "io/ioutil"
+    "net/url"
     "testing"
 
     "github.com/anhpham/downloader/internal/fetcher"
@@ -960,7 +1005,7 @@ type fixedFetcher struct {
 func (f *fixedFetcher) Get(_ context.Context, _ fetcher.Request) (*fetcher.Response, error) {
     return &fetcher.Response{Body: f.getBody, ContentType: "text/html"}, nil
 }
-func (f *fixedFetcher) Post(_ context.Context, _ fetcher.Request, _ /*url.Values*/ interface{}) (*fetcher.Response, error) {
+func (f *fixedFetcher) Post(_ context.Context, _ fetcher.Request, _ url.Values) (*fetcher.Response, error) {
     return &fetcher.Response{Body: f.postBody, ContentType: "text/html"}, nil
 }
 
@@ -988,7 +1033,6 @@ func TestScrape_Page1FromChapterHTML(t *testing.T) {
 }
 ```
 
-(Adjust the `fixedFetcher.Post` signature to take `url.Values` once the import is added; the placeholder is here to keep the test compiling against the real interface.)
 
 - [ ] **Step 3: Run the test to verify it fails**
 
@@ -1230,19 +1274,7 @@ func textOfStrippingEmoteImages(n *html.Node) string {
 }
 ```
 
-- [ ] **Step 6: Fix the fake fetcher signature**
-
-In `scraper_test.go`, replace the placeholder Post signature with:
-
-```go
-import "net/url"
-
-func (f *fixedFetcher) Post(_ context.Context, _ fetcher.Request, _ url.Values) (*fetcher.Response, error) {
-    return &fetcher.Response{Body: f.postBody, ContentType: "text/html"}, nil
-}
-```
-
-- [ ] **Step 7: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
 ```bash
 go test ./internal/comments/ -run TestScrape -v
@@ -1250,7 +1282,7 @@ go test ./internal/comments/ -run TestScrape -v
 
 Expected: PASS. Got at least 1 comment from the fixture.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add internal/comments/ go.mod go.sum
@@ -1411,6 +1443,8 @@ git commit -m "comments: vendor Twemoji 15.1.0 (72x72 PNG set)"
 
 Build the real renderer: header, per-comment block, body wrapping with `go-text/typesetting`. Emoji compositing lands in Task 9.
 
+> **Implementation note.** The `go-text/typesetting` API evolves between releases. The pseudocode in this task is *architectural*; before writing the impl, **read the docs** at `pkg.go.dev/github.com/go-text/typesetting@v0.2.0/shaping` to confirm the exact `Input`/`Output` field names, the `HarfbuzzShaper.Shape` return signature (it returns `(Output, error)` in current versions), and how to construct a `*font.Face`. The test specs below are stable — they assert behaviour, not API shape.
+
 **Files:**
 - Create: `internal/comments/assets.go` (embed wrappers)
 - Create: `internal/comments/renderer.go`
@@ -1499,7 +1533,7 @@ func hasNonWhitePixels(img interface{ At(int, int) (r, g, b, a uint32) }, x0, y0
 }
 ```
 
-(The `hasNonWhitePixels` helper is defined properly in Step 5.)
+(The `hasNonWhitePixels` helper is defined properly in Step 6.)
 
 - [ ] **Step 4: Run tests to verify they fail**
 
@@ -1510,6 +1544,8 @@ go test ./internal/comments/ -run TestRender -v
 Expected: FAIL — Render is not defined.
 
 - [ ] **Step 5: Implement Render — text core only (emoji in Task 9)**
+
+Use this import block. `golang.org/x/image/font` is imported as `xfont` so the bare `font` name is free for `go-text/typesetting/font`, avoiding the collision that bit the v1 draft of this plan.
 
 ```go
 // internal/comments/renderer.go
@@ -1525,9 +1561,10 @@ import (
     "io"
     "strings"
 
-    "github.com/go-text/typesetting/font"
+    gtfont "github.com/go-text/typesetting/font"
     "github.com/go-text/typesetting/shaping"
     "github.com/rivo/uniseg"
+    xfont "golang.org/x/image/font"
     "golang.org/x/image/font/opentype"
     "golang.org/x/image/math/fixed"
 )
@@ -1546,12 +1583,16 @@ const (
 )
 
 var (
-    bgColor    = color.RGBA{0xff, 0xff, 0xff, 0xff}
-    textColor  = color.RGBA{0x22, 0x22, 0x22, 0xff}
-    metaColor  = color.RGBA{0x88, 0x88, 0x88, 0xff}
-    sepColor   = color.RGBA{0xdd, 0xdd, 0xdd, 0xff}
+    bgColor   = color.RGBA{0xff, 0xff, 0xff, 0xff}
+    textColor = color.RGBA{0x22, 0x22, 0x22, 0xff}
+    metaColor = color.RGBA{0x88, 0x88, 0x88, 0xff}
+    sepColor  = color.RGBA{0xdd, 0xdd, 0xdd, 0xff}
 )
+```
 
+Continue with the architectural skeleton below. Where it says **"shape `s` via go-text"**, write the real shaping call — consult `pkg.go.dev/github.com/go-text/typesetting@v0.2.0/shaping` for `shaping.Input` fields (`Text`, `RunStart`, `RunEnd`, `Face`, `Size`, `Script`, `Direction`, `Language`) and `HarfbuzzShaper.Shape` (returns `(Output, error)`). `Size` is a `fixed.Int26_6`; use `fixed.I(int(size))` to convert from a numeric size.
+
+```go
 // Render writes a PNG comment page to w. Callers should not invoke
 // Render on an empty []Comment — the function returns an error in
 // that case so a chapter with no comments produces no file.
@@ -1559,243 +1600,94 @@ func Render(cs []Comment, w io.Writer) error {
     if len(cs) == 0 {
         return errors.New("Render: no comments to render")
     }
+    regular, err := opentype.Parse(notoRegularTTF)
+    if err != nil { return fmt.Errorf("regular font: %w", err) }
+    bold, err := opentype.Parse(notoBoldTTF)
+    if err != nil { return fmt.Errorf("bold font: %w", err) }
 
-    regularFont, err := parseFont(notoRegularTTF)
-    if err != nil {
-        return fmt.Errorf("regular font: %w", err)
-    }
-    boldFont, err := parseFont(notoBoldTTF)
-    if err != nil {
-        return fmt.Errorf("bold font: %w", err)
-    }
-
-    // First pass: measure each comment's height.
+    // 1. Measure each comment by laying out its body.
     blocks := make([]commentBlock, len(cs))
     for i, c := range cs {
-        blocks[i] = layoutComment(c, regularFont, boldFont)
+        blocks[i] = layoutComment(c, regular)
     }
 
+    // 2. Sum heights, allocate canvas, fill background.
     totalHeight := headerHeight
-    for _, b := range blocks {
-        totalHeight += b.height
-    }
-
+    for _, b := range blocks { totalHeight += b.height }
     img := image.NewRGBA(image.Rect(0, 0, canvasWidth, totalHeight))
     draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
 
-    drawHeader(img, len(cs), boldFont)
-
+    // 3. Header and blocks.
+    drawHeader(img, len(cs), bold)
     y := headerHeight
     for _, b := range blocks {
-        drawComment(img, b, y, regularFont, boldFont)
+        drawComment(img, b, y, regular, bold)
         y += b.height
     }
-
     return png.Encode(w, img)
 }
 
 type commentBlock struct {
     comment Comment
-    lines   []shapedLine
+    bodyLines []string // already wrapped to contentWidth; each line is rendered as a single shaped run
     height  int
 }
 
-type shapedLine struct {
-    runs []shapedRun
-}
-
-type shapedRun struct {
-    text    string
-    glyphs  []shaping.Glyph
-    advance fixed.Int26_6
-}
-
-func parseFont(raw []byte) (*opentype.Font, error) {
-    return opentype.Parse(raw)
-}
-
-func layoutComment(c Comment, regular, bold *opentype.Font) commentBlock {
-    block := commentBlock{comment: c}
-    // Header row inside a block: name + level chip + likes.
-    // Reserve ~40 px for it.
+func layoutComment(c Comment, regular *opentype.Font) commentBlock {
     nameRowHeight := int(nameSize * lineSpacing)
-
-    // Body lines.
-    block.lines = wrapBody(c.Body, regular, bodySize, contentWidth)
-    bodyHeight := int(bodySize*lineSpacing) * len(block.lines)
-    if len(block.lines) == 0 {
-        bodyHeight = int(bodySize * lineSpacing) // reserve one empty line
-    }
-
-    block.height = commentPadTop + nameRowHeight + bodyHeight + commentPadBot + sepHeight
-    return block
-}
-
-func wrapBody(body string, f *opentype.Font, size float64, maxWidth int) []shapedLine {
-    if body == "" {
-        return nil
-    }
-    var lines []shapedLine
-    for _, paragraph := range strings.Split(body, "\n") {
-        para := strings.TrimSpace(paragraph)
-        if para == "" {
-            continue
-        }
-        lines = append(lines, wrapParagraph(para, f, size, maxWidth)...)
-    }
-    return lines
-}
-
-// wrapParagraph greedily wraps `text` to fit `maxWidth` pixels at
-// the given font size. Splits on grapheme clusters via uniseg.
-func wrapParagraph(text string, f *opentype.Font, size float64, maxWidth int) []shapedLine {
-    g := uniseg.NewGraphemes(text)
-    var clusters []string
-    for g.Next() {
-        clusters = append(clusters, g.Str())
-    }
-
-    shaper := shaping.HarfbuzzShaper{}
-    fontFace := &font.Face{Font: f, Size: float32(size)}
-
-    var lines []shapedLine
-    var current []string
-    for _, cluster := range clusters {
-        candidate := strings.Join(append(current, cluster), "")
-        if measure(candidate, shaper, fontFace) > fixed.I(maxWidth) && len(current) > 0 {
-            lines = append(lines, shapeLine(strings.Join(current, ""), shaper, fontFace))
-            current = []string{cluster}
-        } else {
-            current = append(current, cluster)
-        }
-    }
-    if len(current) > 0 {
-        lines = append(lines, shapeLine(strings.Join(current, ""), shaper, fontFace))
-    }
-    return lines
-}
-
-func measure(text string, shaper shaping.HarfbuzzShaper, fontFace *font.Face) fixed.Int26_6 {
-    line := shapeLine(text, shaper, fontFace)
-    var w fixed.Int26_6
-    for _, r := range line.runs {
-        w += r.advance
-    }
-    return w
-}
-
-func shapeLine(text string, shaper shaping.HarfbuzzShaper, fontFace *font.Face) shapedLine {
-    input := shaping.Input{
-        Text:     []rune(text),
-        RunStart: 0, RunEnd: len([]rune(text)),
-        Face: fontFace,
-        Size: fontFace.Size,
-    }
-    out := shaper.Shape(input)
-    var adv fixed.Int26_6
-    for _, g := range out.Glyphs {
-        adv += g.XAdvance
-    }
-    return shapedLine{runs: []shapedRun{{text: text, glyphs: out.Glyphs, advance: adv}}}
-}
-
-func drawHeader(img *image.RGBA, n int, bold *opentype.Font) {
-    title := fmt.Sprintf("Bình Luận (%d)", n)
-    drawText(img, title, sideMargin, headerHeight/2+10, bold, nameSize, textColor)
-    drawHLine(img, headerHeight-1, sepColor)
-}
-
-func drawComment(img *image.RGBA, b commentBlock, y int, regular, bold *opentype.Font) {
-    cy := y + commentPadTop
-    // Name in bold + level chip in grey.
-    drawText(img, b.comment.Name, sideMargin, cy+20, bold, nameSize, textColor)
-    if b.comment.Level != "" {
-        // Place chip ~8px after the name; approximate by indenting
-        // a fixed amount — refinement happens after the gate passes.
-        drawText(img, "· "+b.comment.Level, sideMargin+220, cy+20,
-            regular, 16, metaColor)
-    }
-    if b.comment.LikeCount > 0 {
-        like := fmt.Sprintf("♥ %d", b.comment.LikeCount)
-        drawText(img, like, canvasWidth-sideMargin-80, cy+20,
-            regular, 16, metaColor)
-    }
-    cy += int(nameSize * lineSpacing)
-
-    for _, line := range b.lines {
-        drawShapedLine(img, line, sideMargin, cy+int(bodySize), regular)
-        cy += int(bodySize * lineSpacing)
-    }
-
-    drawHLine(img, y+b.height-1, sepColor)
-}
-
-func drawText(img *image.RGBA, s string, x, y int, f *opentype.Font, size float64, col color.Color) {
-    shaper := shaping.HarfbuzzShaper{}
-    fontFace := &font.Face{Font: f, Size: float32(size)}
-    line := shapeLine(s, shaper, fontFace)
-    drawShapedLine(img, line, x, y, f)
-    _ = col // colour application lands when we plug into the rasteriser
-}
-
-func drawShapedLine(img *image.RGBA, line shapedLine, x, y int, f *opentype.Font) {
-    // Real rasterisation: walk each glyph, fetch its outline from
-    // the opentype.Font, fill into the image. The minimal working
-    // path here is `golang.org/x/image/font/opentype` Face +
-    // golang.org/x/image/font.Drawer, falling back to a per-run
-    // string draw. We use Drawer for legibility — the structural
-    // tests don't depend on glyph positioning precision.
-    face, err := opentype.NewFace(f, &opentype.FaceOptions{
-        Size: 20, DPI: 72, // overridden when callers pass their own Face later
-    })
-    if err != nil {
-        return
-    }
-    defer face.Close()
-    // Simple draw: a single line of text via the standard drawer.
-    // Once emoji compositing lands in Task 9, this is replaced by
-    // a per-grapheme-cluster loop.
-    drawSimpleString(img, line.runs[0].text, x, y, face)
-}
-
-func drawHLine(img *image.RGBA, y int, col color.Color) {
-    if y < 0 || y >= img.Bounds().Dy() {
-        return
-    }
-    for x := 0; x < img.Bounds().Dx(); x++ {
-        img.Set(x, y, col)
+    lines := wrapBody(c.Body, regular, bodySize, contentWidth)
+    bodyHeight := int(bodySize*lineSpacing) * max(1, len(lines))
+    return commentBlock{
+        comment: c,
+        bodyLines: lines,
+        height: commentPadTop + nameRowHeight + bodyHeight + commentPadBot + sepHeight,
     }
 }
 ```
 
-- [ ] **Step 6: Add the simple-string draw helper**
+The remaining helpers — `wrapBody`, `drawHeader`, `drawComment`, `drawHLine`, plus a `drawTextLine(img, s, x, y, face)` that does one line of shaped text — are straightforward once you have a working `shapeString(text, face) (xfont.Face-compatible advance, drawer)`. Pseudocode:
 
-```go
-// Append to internal/comments/renderer.go
+```text
+shapeString(text, gtFace):
+    input := shaping.Input{
+        Text: []rune(text), RunStart: 0, RunEnd: utf8.RuneCountInString(text),
+        Face: gtFace,
+        Size: fixed.I(int(gtFace.Size)),
+        Script: language.Latin,    // Vietnamese is Latin-script
+        Direction: di.DirectionLTR,
+        Language: language.NewLanguage("vi"),
+    }
+    out, err := (&shaping.HarfbuzzShaper{}).Shape(input)
+    ... return out
 
-import (
-    "golang.org/x/image/font"
-    xfont "golang.org/x/image/font"
-)
-
-func drawSimpleString(img *image.RGBA, text string, x, y int, face xfont.Face) {
+drawTextLine(img, text, x, y, otFace):
+    // otFace is a golang.org/x/image/font/opentype Face built via
+    // opentype.NewFace(f, &opentype.FaceOptions{Size: <px>, DPI: 72}).
+    // For the v1 renderer it's acceptable to fall back to
+    // xfont.Drawer.DrawString for the WHOLE line; per-cluster
+    // positioning only matters once emoji compositing lands (Task 9).
     d := &xfont.Drawer{
-        Dst:  img,
-        Src:  &image.Uniform{textColor},
-        Face: face,
-        Dot:  fixed.P(x, y),
+        Dst: img, Src: &image.Uniform{textColor}, Face: otFace,
+        Dot: fixed.P(x, y),
     }
     d.DrawString(text)
-}
+
+wrapBody(body, regular, size, maxWidth):
+    // Greedy line break on uniseg grapheme clusters.
+    // Measure each candidate via shapeString; emit a line when the
+    // candidate exceeds maxWidth.
 ```
 
-If the duplicate `font` import is ambiguous, rename the alias as needed.
+The like-count in the per-comment row renders as plain text `♥ N` — U+2665 is below 0x1F000 so Task 9's emoji-range check (next task) won't pick it up, and it will pass through `drawTextLine` directly.
 
-- [ ] **Step 7: Fix the `hasNonWhitePixels` helper**
+- [ ] **Step 6: Add the `hasNonWhitePixels` test helper**
+
+The placeholder in renderer_test.go (which always returns `false`) must be replaced:
 
 ```go
-// Replace the placeholder in renderer_test.go with the real
-// helper. Move it out of the test struct.
+// internal/comments/renderer_test.go
+
+import "image"
 
 func hasNonWhitePixels(img image.Image, x0, y0, x1, y1 int) bool {
     for y := y0; y < y1; y++ {
@@ -1810,9 +1702,9 @@ func hasNonWhitePixels(img image.Image, x0, y0, x1, y1 int) bool {
 }
 ```
 
-(Remove the placeholder definition that used a struct interface.)
+Delete the placeholder version (the one with the inline `interface{ At(...) ... }` parameter type).
 
-- [ ] **Step 8: Run all tests**
+- [ ] **Step 7: Run all tests**
 
 ```bash
 go test ./internal/comments/ -v
@@ -1820,7 +1712,7 @@ go test ./internal/comments/ -v
 
 Expected: PASS for `TestRender_BasicShape`, `TestRender_EmptyCommentsNoOp`, `TestRender_VietnameseShapes`. PASS for the scraper tests too.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add internal/comments/
@@ -1875,11 +1767,19 @@ go test ./internal/comments/ -run TestRender_PlainEmoji -v
 
 Expected: FAIL — no yellow pixels.
 
-- [ ] **Step 3: Add a Twemoji loader and a per-cluster draw**
+- [ ] **Step 3: Add the Twemoji embed and loader**
+
+Append a `//go:embed` directive to `internal/comments/assets.go`:
 
 ```go
-// Append to internal/comments/assets.go
-import "embed"
+// internal/comments/assets.go — add the new directive and helper
+// alongside the existing notoRegularTTF / notoBoldTTF embeds.
+package comments
+
+import (
+    "embed"
+    _ "embed" // for the //go:embed directives above
+)
 
 //go:embed assets/twemoji/*.png
 var twemojiFS embed.FS
@@ -1893,20 +1793,50 @@ func twemojiPNG(seq string) ([]byte, bool) {
 }
 ```
 
+If the existing file already imports `embed` for `_ "embed"`, drop the duplicate.
+
+- [ ] **Step 4: Update the imports in `renderer.go`**
+
+`renderer.go`'s import block (from Task 8) is missing entries needed by Task 9: `bytes`, `unicode/utf8`. Edit the existing import block to add them. Do NOT paste a second `import (...)` block — Go disallows two import declarations referencing the same package, and a partial-overlap second block will fail to compile.
+
+The fully-updated import block reads:
+
 ```go
-// Add to internal/comments/renderer.go
 import (
+    "bytes"
+    "errors"
+    "fmt"
+    "image"
+    "image/color"
+    "image/draw"
     "image/png"
+    "io"
     "strings"
     "unicode/utf8"
 
+    gtfont "github.com/go-text/typesetting/font"
+    "github.com/go-text/typesetting/shaping"
     "github.com/rivo/uniseg"
+    xfont "golang.org/x/image/font"
+    "golang.org/x/image/font/opentype"
+    "golang.org/x/image/math/fixed"
 )
+```
 
+- [ ] **Step 5: Replace `drawTextLine` with a per-cluster variant**
+
+The line-drawing helper introduced in Task 8 currently draws the whole string in one `xfont.Drawer.DrawString` call. Replace it with a per-grapheme-cluster loop that composites Twemoji PNGs for emoji clusters and falls back to the text drawer for non-emoji clusters. **Use `Edit` to replace the existing function — do not paste a second `drawTextLine`.** Go produces a `redeclared in this block` compile error for duplicate top-level functions in the same package.
+
+Add these helpers (new symbols, not replacements):
+
+```go
+// emojiKey builds the Twemoji filename key from a grapheme cluster:
+// e.g. "👨‍👩‍👧" → "1f468-200d-1f469-200d-1f467". FE0F variation
+// selectors are stripped because Twemoji filenames don't include them.
 func emojiKey(cluster string) string {
     var parts []string
     for _, r := range cluster {
-        if r == 0xFE0F { // strip variation selector for Twemoji lookup
+        if r == 0xFE0F {
             continue
         }
         parts = append(parts, fmt.Sprintf("%x", r))
@@ -1926,58 +1856,20 @@ func decodeTwemoji(seq string) (image.Image, bool) {
     return img, true
 }
 
-// Override drawShapedLine to walk grapheme clusters and composite
-// emoji PNGs in place of their glyphs.
-func drawShapedLine(img *image.RGBA, line shapedLine, x, y int, f *opentype.Font) {
-    raw := line.runs[0].text
-    if !strings.ContainsFunc(raw, func(r rune) bool { return r >= 0x1F000 }) {
-        // Fast path: no surrogate-range chars, plain text only.
-        face, _ := opentype.NewFace(f, &opentype.FaceOptions{Size: bodySize, DPI: 72})
-        defer face.Close()
-        drawSimpleString(img, raw, x, y, face)
-        return
-    }
-
-    face, _ := opentype.NewFace(f, &opentype.FaceOptions{Size: bodySize, DPI: 72})
-    defer face.Close()
-
-    cx := x
-    g := uniseg.NewGraphemes(raw)
-    for g.Next() {
-        cluster := g.Str()
-        if !looksLikeEmoji(cluster) {
-            d := &xfont.Drawer{Dst: img, Src: &image.Uniform{textColor}, Face: face,
-                Dot: fixed.P(cx, y)}
-            d.DrawString(cluster)
-            cx += d.Dot.X.Round() - fixed.P(cx, y).X.Round()
-            continue
-        }
-        seq := emojiKey(cluster)
-        ei, ok := decodeTwemoji(seq)
-        if !ok {
-            // Fallback: draw the cluster as text — likely tofu.
-            d := &xfont.Drawer{Dst: img, Src: &image.Uniform{textColor}, Face: face,
-                Dot: fixed.P(cx, y)}
-            d.DrawString(cluster)
-            cx += int(bodySize)
-            continue
-        }
-        // Scale the 72px Twemoji down to body-text height.
-        target := int(bodySize)
-        scaled := scaleImage(ei, target, target)
-        rect := image.Rect(cx, y-target+2, cx+target, y+2)
-        draw.Draw(img, rect, scaled, image.Point{}, draw.Over)
-        cx += target + 2
-    }
-}
-
+// looksLikeEmoji is intentionally conservative: it only triggers
+// on grapheme clusters whose leading rune is in (or beyond) the
+// supplementary plane emoji range. ASCII and Latin (including
+// Vietnamese composed forms) are left to the text path. ♥ (U+2665)
+// is below the threshold and renders as text — that's intentional
+// for the like-count display in the header row.
 func looksLikeEmoji(cluster string) bool {
     r, _ := utf8.DecodeRuneInString(cluster)
-    return r >= 0x1F000 || r == 0x2600 || r == 0x2700
+    return r >= 0x1F000
 }
 
-// scaleImage is a small nearest-neighbour scaler. Acceptable
-// quality at 20px target; we can upgrade to x/image/draw later.
+// scaleImage is a tiny nearest-neighbour scaler — good enough for
+// dropping a 72×72 Twemoji into a 20×20 body-text slot. Upgrade to
+// golang.org/x/image/draw.CatmullRom later if quality matters.
 func scaleImage(src image.Image, w, h int) *image.RGBA {
     dst := image.NewRGBA(image.Rect(0, 0, w, h))
     sb := src.Bounds()
@@ -1992,7 +1884,68 @@ func scaleImage(src image.Image, w, h int) *image.RGBA {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify the emoji test passes**
+Then **replace** (not append) the existing `drawTextLine` from Task 8 with this per-cluster version. Use the `Edit` tool's `old_string`/`new_string` to swap it in place:
+
+```go
+// New body of drawTextLine — replaces Task 8's whole-line draw.
+//
+// y is the text baseline. The font face must have already been
+// constructed by the caller at the correct size.
+func drawTextLine(img *image.RGBA, text string, x, y int, otFace xfont.Face) {
+    if !strings.ContainsFunc(text, func(r rune) bool { return r >= 0x1F000 }) {
+        // Fast path: no emoji in the line.
+        (&xfont.Drawer{
+            Dst:  img,
+            Src:  &image.Uniform{textColor},
+            Face: otFace,
+            Dot:  fixed.P(x, y),
+        }).DrawString(text)
+        return
+    }
+
+    cx := fixed.I(x)
+    g := uniseg.NewGraphemes(text)
+    for g.Next() {
+        cluster := g.Str()
+        if !looksLikeEmoji(cluster) {
+            d := &xfont.Drawer{
+                Dst:  img,
+                Src:  &image.Uniform{textColor},
+                Face: otFace,
+                Dot:  fixed.Point26_6{X: cx, Y: fixed.I(y)},
+            }
+            d.DrawString(cluster)
+            cx = d.Dot.X
+            continue
+        }
+        seq := emojiKey(cluster)
+        ei, ok := decodeTwemoji(seq)
+        if !ok {
+            // Twemoji bundle has no match — draw the cluster as text
+            // (likely tofu). Accepted per the spec's "emoji are
+            // best-effort" rule.
+            d := &xfont.Drawer{
+                Dst:  img,
+                Src:  &image.Uniform{textColor},
+                Face: otFace,
+                Dot:  fixed.Point26_6{X: cx, Y: fixed.I(y)},
+            }
+            d.DrawString(cluster)
+            cx = d.Dot.X
+            continue
+        }
+        target := int(bodySize)
+        scaled := scaleImage(ei, target, target)
+        rect := image.Rect(cx.Round(), y-target+2, cx.Round()+target, y+2)
+        draw.Draw(img, rect, scaled, image.Point{}, draw.Over)
+        cx += fixed.I(target + 2)
+    }
+}
+```
+
+If Task 8's renderer named the line-drawing helper something else (e.g. `drawSimpleString`), rename it in both definitions for consistency before this edit — the executor should consult the file as it stands rather than this plan's spelling.
+
+- [ ] **Step 6: Run the tests to verify the emoji test passes**
 
 ```bash
 go test ./internal/comments/ -v
@@ -2000,7 +1953,7 @@ go test ./internal/comments/ -v
 
 Expected: PASS for `TestRender_PlainEmojiCompositesPixels`. The Vietnamese test should still pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add internal/comments/
@@ -2679,9 +2632,12 @@ git commit -m "pipeline: pure-function Plan covers all three modes"
 
 ## Task 13: Shrink downloader to FetchChapterImages
 
+> **Tree non-compile window.** Removing the existing `Downloader` struct and its `Run`/`Result`/`ChapterFailure` types breaks `main.go` (which still constructs `&downloader.Downloader{...}`) until Task 15 lands the subcommand dispatch. The plan accepts this — Task 13's commit will pass `go test ./internal/downloader/ ./internal/layout/ ./internal/comments/ ./internal/archive/ ./internal/pipeline/` but **`go build ./...` and a top-level `go test ./...` will fail until Task 15**. Run the narrower test command after Task 13; defer the full `go test ./...` until Task 15.
+
 **Files:**
 - Create: `internal/downloader/images.go`
-- Modify: `internal/downloader/downloader.go`
+- Modify: `internal/downloader/downloader.go` (drastically shrunk; many helpers deleted)
+- Modify or delete: `internal/downloader/downloader_test.go` (existing end-to-end orchestration tests are no longer applicable; delete or rewrite)
 
 - [ ] **Step 1: Identify what stays vs goes**
 
@@ -2689,12 +2645,32 @@ git commit -m "pipeline: pure-function Plan covers all three modes"
 grep -n 'func ' internal/downloader/downloader.go
 ```
 
-Keep the per-chapter image-fetch loop and the `.part` → rename helper. Remove:
-- `chapterCacheFile` (`.chapters.json`) reading/writing
-- `.done` sentinel writing/reading
-- Manga-level orchestration (`Run`, `Download`, etc.) — moved to pipeline
+The existing file (`internal/downloader/downloader.go`) defines all of these symbols. Delete every one **except** the inner image-fetch helper `(*Downloader).fetchTo` (which becomes the new `fetchOne`) and the extension helper `imageExt` (which becomes `extFromURL`). The package is essentially being rebuilt around `FetchChapterImages` (Step 2 below).
+
+Kill list — delete every one of these from `internal/downloader/downloader.go`:
+
+- `const chapterCacheFile`
+- `type Downloader struct`
+- `type Result struct`
+- `type ChapterFailure struct`
+- `func (d *Downloader) Run`
+- `func (d *Downloader) loadOrFetchChapters`
+- `func readChapterCache`
+- `func writeChapterCache`
+- `func (d *Downloader) runChapter`
+- `func filterRange` (re-implemented in `internal/pipeline`)
+- `func chapterNumeric` (re-implemented in `internal/pipeline.parseChapterNumber`)
+- `func hasDoneSentinel`
+- (`folderWidth`, `digitWidth`, `chapterFolder` were already removed in Task 3.)
+
+The downloader package after Task 13 contains only `images.go` (see Step 2). The original `downloader.go` may end up empty enough to delete entirely — if so, `git rm` it.
 
 - [ ] **Step 2: Extract FetchChapterImages**
+
+Real types (verified from `internal/site/`):
+
+- `(*source.Site).ChapterImages(ctx, c site.Chapter) ([]site.ImageRef, error)` — takes a `site.Chapter`, not a URL string; returns `[]site.ImageRef`, each carrying its own `URL` and `Referer`.
+- There is no `source.New(...)` constructor — the struct is constructed directly: `&source.Site{Fetcher: f}`.
 
 ```go
 // internal/downloader/images.go
@@ -2703,69 +2679,73 @@ package downloader
 import (
     "context"
     "fmt"
-    "io"
     "os"
     "path/filepath"
+    "strings"
 
     "github.com/anhpham/downloader/internal/fetcher"
     "github.com/anhpham/downloader/internal/layout"
-    "github.com/anhpham/downloader/internal/site/source"
+    "github.com/anhpham/downloader/internal/site"
+    sourcesite "github.com/anhpham/downloader/internal/site/source"
 )
 
-// FetchChapterImages downloads every image listed by the chapter
-// page at chapterURL into destDir. Each image is written via a
-// .part file and renamed on success. The function returns the
-// first error encountered.
-func FetchChapterImages(ctx context.Context, chapterURL, destDir string, f fetcher.Fetcher) error {
-    s := source.New(f) // adjust to whatever constructor exists
-    imageURLs, err := s.ChapterImages(ctx, chapterURL)
+// FetchChapterImages downloads every image referenced by the
+// chapter page into destDir. Each image lands as a .part file and
+// is atomically renamed once its bytes are on disk.
+func FetchChapterImages(ctx context.Context, chapter site.Chapter, destDir string, f fetcher.Fetcher) error {
+    s := &sourcesite.Site{Fetcher: f}
+    refs, err := s.ChapterImages(ctx, chapter)
     if err != nil { return fmt.Errorf("list images: %w", err) }
     if err := os.MkdirAll(destDir, 0o755); err != nil { return err }
 
-    for i, u := range imageURLs {
-        ext := guessExt(u)
+    for i, ref := range refs {
+        ext := extFromURL(ref.URL)
         dst := filepath.Join(destDir, layout.ImageName(i+1, ext))
-        if err := fetchOne(ctx, u, chapterURL, dst, f); err != nil {
+        if err := fetchOne(ctx, ref, dst, f); err != nil {
             return fmt.Errorf("image %d: %w", i+1, err)
         }
     }
     return nil
 }
 
-func fetchOne(ctx context.Context, u, referer, dst string, f fetcher.Fetcher) error {
-    resp, err := f.Get(ctx, fetcher.Request{URL: u, Referer: referer})
+func fetchOne(ctx context.Context, ref site.ImageRef, dst string, f fetcher.Fetcher) error {
+    resp, err := f.Get(ctx, fetcher.Request{URL: ref.URL, Referer: ref.Referer})
     if err != nil { return err }
     tmp := dst + ".part"
     if err := os.WriteFile(tmp, resp.Body, 0o644); err != nil { return err }
     return os.Rename(tmp, dst)
 }
 
-func guessExt(u string) string {
+// extFromURL returns the lowercase extension (without the dot)
+// extracted from a URL, defaulting to "jpg" when the path has none.
+func extFromURL(u string) string {
     base := filepath.Base(u)
-    if i := filepath.Ext(base); i != "" {
-        return i[1:]
+    if i := strings.LastIndexByte(base, '.'); i != -1 && i < len(base)-1 {
+        return strings.ToLower(base[i+1:])
     }
     return "jpg"
 }
-
-// (Optional: copy bytes through io.Copy if Response had a stream
-// instead of Body []byte — current Response stores Body directly.)
-var _ io.Writer = (*os.File)(nil)
 ```
 
-- [ ] **Step 3: Delete the old orchestration**
+Because `FetchChapterImages` now takes a `site.Chapter` (carrying both `Number` and `URL`), Task 14's `pipeline.Run` call site must pass the full chapter, not just the URL. The Task entry for executing a `Both`/`Render` task already holds the URL on `Task`; we extend the `Task` struct in Task 12 to carry the full `site.Chapter` (or at minimum the `Number` field plus the `URL`) so the pipeline can construct the chapter for `FetchChapterImages`.
 
-In `internal/downloader/downloader.go`, remove every function and constant that's no longer used. Keep only what `FetchChapterImages` needs (the source-site helper invocation, if it lived here). Update `downloader_test.go` to drop tests for removed behaviour.
+- [ ] **Step 3: Delete the kill-list symbols from `downloader.go`**
 
-- [ ] **Step 4: Run all tests**
+Open `internal/downloader/downloader.go` and delete every symbol on the kill list above. If the file becomes empty, `git rm` it. Otherwise keep the `package downloader` clause and any stragglers (there should not be stragglers, but if there are, they're symbols the kill list missed — flag and delete).
+
+- [ ] **Step 4: Update the downloader test file**
+
+Open `internal/downloader/downloader_test.go`. The existing tests exercise the full orchestration that this task is deleting — they'll be unreferenced and fail to compile. Delete the file or rewrite it to cover `FetchChapterImages` with a fake fetcher (one tiny test asserting that one image gets fetched + renamed is sufficient; the heavy mode logic lives in `internal/pipeline` tests now).
+
+- [ ] **Step 5: Run the limited test suite**
 
 ```bash
-go test ./...
+go test ./internal/layout/ ./internal/fetcher/ ./internal/comments/ ./internal/archive/ ./internal/pipeline/ ./internal/downloader/
 ```
 
-Expected: PASS for everything that hasn't been deleted. If old downloader tests fail because their orchestrator is gone, delete those tests too.
+Expected: PASS. **Do not run `go test ./...` or `go build ./...` here** — `main.go` still references the deleted `Downloader` struct and will fail. That gets fixed in Task 15.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add internal/downloader/
@@ -2857,25 +2837,39 @@ func Run(ctx context.Context, opts Opts) error {
     // Honour --from / --to AFTER width is captured.
     chapters = filterRange(chapters, opts.From, opts.To)
 
-    // Plan in TWO passes so we can match existing chapters at the
-    // archive's narrower width while still emitting new chapters
-    // at the wider new width.
+    // Plan in TWO passes when the source's required width has
+    // grown past the archive's existing width. Otherwise a single
+    // pass at effectiveWidth is correct.
+    //
+    // Pass 1 (existing chapters): width = archiveWidth, real insp.
+    //   Plan picks up SyncComments-style backfills (chapter is in
+    //   archive at archiveWidth, missing comments) and skips
+    //   chapters not yet in the archive (they're handled in pass 2).
+    //
+    // Pass 2 (new chapters): width = sourceWidth, *empty* insp.
+    //   Plan emits a Both task for every chapter; we then filter
+    //   out any that already exist in the archive under the
+    //   narrower width.
     var tasks []Task
     if archiveWidth > 0 && archiveWidth < sourceWidth {
-        // Existing chapters: use archive's width.
         existing := Plan(opts.Mode, chapters, insp, archiveWidth)
         for _, t := range existing {
-            if insp.Have[t.Folder] || insp.HaveComments[t.Folder] {
+            // Only keep tasks that touch a chapter actually
+            // present in the archive at archiveWidth. Plan emits
+            // tasks for unknowns too (which would be re-emitted in
+            // pass 2 at sourceWidth) — drop them here.
+            if insp.Have[t.Folder] {
                 tasks = append(tasks, t)
             }
         }
-        // New chapters: use source width.
         empty := archive.Inspection{Have: map[string]bool{}, HaveComments: map[string]bool{}}
         novel := Plan(opts.Mode, chapters, empty, sourceWidth)
         for _, t := range novel {
-            if !insp.Have[layout.Folder("", t.Number, archiveWidth)] {
-                tasks = append(tasks, t)
+            // Skip chapters already in the archive under the narrower width.
+            if insp.Have[layout.Folder("", t.Number, archiveWidth)] {
+                continue
             }
+            tasks = append(tasks, t)
         }
     } else {
         tasks = Plan(opts.Mode, chapters, insp, effectiveWidth)
@@ -2937,7 +2931,8 @@ func executeTask(ctx context.Context, t Task, scratchRoot string, opts Opts) err
     if err := os.MkdirAll(chDir, 0o755); err != nil { return err }
 
     if t.Kind == Both {
-        if err := downloader.FetchChapterImages(ctx, t.URL, chDir, opts.Fetcher); err != nil {
+        ch := site.Chapter{Number: t.Number, URL: t.URL}
+        if err := downloader.FetchChapterImages(ctx, ch, chDir, opts.Fetcher); err != nil {
             return fmt.Errorf("fetch images %s: %w", t.Folder, err)
         }
     }
