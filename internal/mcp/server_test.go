@@ -1,7 +1,10 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"os"
 	"testing"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -57,4 +60,35 @@ func newTestPair(t *testing.T) (*Server, *sdk.ClientSession) {
 	}
 	t.Cleanup(func() { _ = sess.Close() })
 	return srv, sess
+}
+
+// TestStdoutStaysClean asserts that constructing the server AND
+// invoking every read-only tool never writes to stdout. Tool
+// handlers must route logs through the configured stderr logger.
+//
+// Sync tools are excluded because they need a fully-seeded cookie
+// file + an injected runner; the integration tests in
+// integration_test.go already exercise their handler bodies.
+func TestStdoutStaysClean(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = oldStdout })
+
+	_, sess := newTestPair(t)
+	for _, name := range []string{"get_cookie_status", "list_manga"} {
+		if _, err := sess.CallTool(context.Background(), &sdk.CallToolParams{Name: name}); err != nil {
+			t.Fatalf("call %s: %v", name, err)
+		}
+	}
+
+	w.Close()
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	if buf.Len() != 0 {
+		t.Fatalf("stdout polluted with %d bytes: %q", buf.Len(), buf.String())
+	}
 }
