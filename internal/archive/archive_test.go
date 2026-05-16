@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,5 +74,77 @@ func TestInspect_MissingFile(t *testing.T) {
 	}
 	if len(in.Have) != 0 {
 		t.Errorf("Have should be empty")
+	}
+}
+
+func TestStageAndRename_PreservesOriginalAndAppends(t *testing.T) {
+	p := buildCBZ(t, map[string][]byte{
+		"chap-0001/001.jpg": []byte("AAA"),
+	})
+
+	// Scratch dir: chap-0001 has comments to add; chap-0002 is brand new.
+	scratch := t.TempDir()
+	must := func(err error) { t.Helper(); if err != nil { t.Fatal(err) } }
+	must(os.MkdirAll(filepath.Join(scratch, "chap-0001"), 0o755))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0001", "zzz-comments.png"), []byte("PNG"), 0o644))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0001", ".ok"), nil, 0o644))
+	must(os.MkdirAll(filepath.Join(scratch, "chap-0002"), 0o755))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0002", "001.jpg"), []byte("BBB"), 0o644))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0002", ".ok"), nil, 0o644))
+	// Poisoned chapter: NO .ok marker, must be excluded.
+	must(os.MkdirAll(filepath.Join(scratch, "chap-0003"), 0o755))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0003", "001.jpg"), []byte("CCC"), 0o644))
+
+	if err := StageAndRename(p, scratch); err != nil {
+		t.Fatal(err)
+	}
+
+	zr, err := zip.OpenReader(p)
+	if err != nil { t.Fatal(err) }
+	defer zr.Close()
+
+	got := map[string][]byte{}
+	for _, f := range zr.File {
+		rc, _ := f.Open()
+		b, _ := io.ReadAll(rc)
+		rc.Close()
+		got[f.Name] = b
+	}
+	want := map[string]string{
+		"chap-0001/001.jpg":          "AAA",
+		"chap-0001/zzz-comments.png": "PNG",
+		"chap-0002/001.jpg":          "BBB",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("entries: got %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if string(got[k]) != v {
+			t.Errorf("%s: got %q, want %q", k, got[k], v)
+		}
+	}
+	if _, present := got["chap-0003/001.jpg"]; present {
+		t.Error("chap-0003 should be excluded (no .ok marker)")
+	}
+	for k := range got {
+		if filepath.Base(k) == ".ok" {
+			t.Errorf(".ok leaked into archive: %s", k)
+		}
+	}
+}
+
+func TestStageAndRename_CreatesFreshIfTargetMissing(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "fresh.cbz")
+	scratch := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scratch, "chap-0001"), 0o755); err != nil { t.Fatal(err) }
+	if err := ioutil.WriteFile(filepath.Join(scratch, "chap-0001", "001.jpg"), []byte("X"), 0o644); err != nil { t.Fatal(err) }
+	if err := ioutil.WriteFile(filepath.Join(scratch, "chap-0001", ".ok"), nil, 0o644); err != nil { t.Fatal(err) }
+
+	if err := StageAndRename(p, scratch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatal("fresh.cbz not created:", err)
 	}
 }
