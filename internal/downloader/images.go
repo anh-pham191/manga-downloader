@@ -54,9 +54,16 @@ func fetchOne(ctx context.Context, ref site.ImageRef, dst string, f fetcher.Fetc
 }
 
 // extFromURL returns the lowercase extension (without the dot)
-// extracted from a URL path, defaulting to "jpg".
+// extracted from a URL path, defaulting to "jpg". Strips both the
+// query string (`?cache-buster=…`) and the fragment (`#frag`) from
+// the basename before scanning, so source URLs like
+// `https://cdn.../001.jpg?r=r8645456` correctly yield `jpg` (not
+// `jpg?r=r8645456`).
 func extFromURL(u string) string {
 	base := filepath.Base(u)
+	if i := strings.IndexAny(base, "?#"); i != -1 {
+		base = base[:i]
+	}
 	if i := strings.LastIndexByte(base, '.'); i != -1 && i < len(base)-1 {
 		return strings.ToLower(base[i+1:])
 	}
