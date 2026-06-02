@@ -405,7 +405,7 @@ git commit -m "cli: add --refresh-comments flag (sync-comments only) with warnin
 ## Task 4: Staging — replace, not duplicate
 
 **Files:**
-- Modify: `internal/archive/writer.go:62-136` (`stageViaGoZip`)
+- Modify: `internal/archive/writer.go:70-136` (`stageViaGoZip` body, from `zw := zip.NewWriter(tmp)` onward — leave the `tmpPath`/`tmp`/`cleanup` setup at `:62-68` and the `zw.Close()`/`verifyArchive`/`os.Rename` tail at `:137-158` untouched)
 - Test: `internal/archive/archive_test.go`
 
 - [ ] **Step 1: Write the failing test**
