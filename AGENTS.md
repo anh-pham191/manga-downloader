@@ -35,10 +35,10 @@ acceptance criteria the v1 implementation was built against.
 - **`site.Site`** (`internal/site/site.go`) — one method per page
   type (`ListChapters`, `ChapterImages`). Selectors live behind it
   so a DOM change is isolated to one package.
-- **`fetcher.Fetcher`** — one method (`Get`). Real impl uses
-  `net/http` with a cookie jar; tests inject a fake. Retries,
-  jitter, and the cf-expiry detection live in the real impl, not
-  in callers.
+- **`fetcher.Fetcher`** — `Get` and `Post` (the latter drives comment
+  pagination, see below). Real impl uses `net/http` with a cookie jar;
+  tests inject a fake. Retries, jitter, and the cf-expiry detection
+  live in the real impl, not in callers.
 - **`downloader.Downloader`** — pure orchestration. Knows nothing
   about HTTP or selectors. Tested with `fakeSite` + `fakeFetcher`
   in `downloader_test.go`.
@@ -46,6 +46,40 @@ acceptance criteria the v1 implementation was built against.
 If you're adding a new source site, your work is almost entirely
 inside `internal/site/<sitename>/`. Don't reach into `downloader`
 or `fetcher`.
+
+## Comments
+
+Each chapter's reader comments are scraped and rendered into a single
+`zzz-comments.png` page inside the chapter folder (the `zzz-` prefix
+sorts it last in the `.cbz`). Logic lives in `internal/comments/`.
+
+- **Only top-level (parent) comments are scraped.** `Scrape` posts
+  `parent_id=0` and the parser matches `comment-main-level` articles
+  only. Nested replies — the "N phản hồi" expanders loaded in the
+  browser via `loadReply(<id>)` — are **deliberately not fetched** and
+  are not in the archive. Don't assume replies are covered.
+- **Up to 5 pages per chapter.** Page 1 is server-rendered in the
+  chapter HTML; pages 2..`maxCommentPages` (=5) are POSTed to
+  `/frontend/comment/list`. The loop stops early at the first page
+  that yields zero comments (`internal/comments/scraper.go`). There is
+  no cross-page dedup — correctness past the last real page relies on
+  the server returning an empty page.
+- **`--refresh-comments`** (CLI flag, `sync-comments` mode only)
+  re-scrapes and **replaces** comments on chapters that *already* have
+  a comments page. Without it, `sync-comments` only backfills chapters
+  that are *missing* comments. The flag is warned-and-ignored in
+  `resume`/`sync-manga`, and is intentionally not exposed over MCP.
+  New chapters pulled by `sync-manga`/`resume` already get 5 pages with
+  no flag, because `executeTask` calls `comments.Scrape` for every
+  task regardless of kind.
+- **Staging replaces, never duplicates.** `archive.stageViaGoZip`
+  skips copying any existing archive entry a scratch chapter is about
+  to write (keyed `chap-XXXX/<file>`), so a re-rendered
+  `zzz-comments.png` overwrites the old one instead of producing a
+  duplicate zip entry. The large-archive `stageViaOSZip` path relies
+  on `zip` freshening same-named entries for the same effect. A refresh
+  that scrapes zero comments writes no file and leaves the old comments
+  intact — it never deletes.
 
 ## Testing conventions
 
@@ -122,6 +156,8 @@ every `<manga-root>/.chapters.json` to the new host.
 
 - One source site (the one whose selectors live in
   `internal/site/source/`).
+- Reader **replies are not scraped** — only top-level comments, up to
+  5 pages (see [Comments](#comments)).
 - Cookie expires mid-run on very long mangas; the user has to
   refresh and re-invoke with `--resume`. There is no automated
   refresh path because re-solving Turnstile requires a human.
