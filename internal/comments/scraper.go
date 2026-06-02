@@ -13,10 +13,16 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// Scrape returns the parent-level comments for one chapter, taken
-// from page 1 (rendered server-side in the chapter HTML) and
-// page 2 (loaded via POST /frontend/comment/list). Replies are
-// ignored. Returns at most ~12 comments.
+// maxCommentPages is the highest comment page Scrape will fetch. Page
+// 1 is rendered server-side in the chapter HTML; pages 2..maxCommentPages
+// are loaded via POST /frontend/comment/list. The loop stops early as
+// soon as a page returns zero parent comments.
+const maxCommentPages = 5
+
+// Scrape returns the parent-level comments for one chapter: page 1
+// (server-rendered in the chapter HTML) plus pages 2..maxCommentPages
+// (each a POST to /frontend/comment/list). Replies are ignored. The
+// loop stops at the first page with no parent comments.
 func Scrape(ctx context.Context, chapterURL string, f fetcher.Fetcher) ([]Comment, error) {
 	resp, err := f.Get(ctx, fetcher.Request{URL: chapterURL, Referer: chapterURL})
 	if err != nil {
@@ -29,31 +35,39 @@ func Scrape(ctx context.Context, chapterURL string, f fetcher.Fetcher) ([]Commen
 
 	bookID, episodeID := extractHiddenIDs(doc)
 
-	page1 := parseComments(doc)
+	out := parseComments(doc)
 
-	var page2 []Comment
 	if bookID != "" && episodeID != "" {
-		form := url.Values{
-			"book_id":    {bookID},
-			"parent_id":  {"0"},
-			"page":       {"2"},
-			"episode_id": {episodeID},
-			"team_id":    {"0"},
-		}
-		p2resp, err := f.Post(ctx, fetcher.Request{
-			URL:     "https://truyenqqko.com/frontend/comment/list",
-			Referer: chapterURL,
-		}, form)
-		if err == nil && len(p2resp.Body) > 0 {
-			if frag, perr := html.Parse(bytes.NewReader(p2resp.Body)); perr == nil {
-				page2 = parseComments(frag)
+		for p := 2; p <= maxCommentPages; p++ {
+			form := url.Values{
+				"book_id":    {bookID},
+				"parent_id":  {"0"},
+				"page":       {strconv.Itoa(p)},
+				"episode_id": {episodeID},
+				"team_id":    {"0"},
 			}
+			presp, err := f.Post(ctx, fetcher.Request{
+				URL:     "https://truyenqqko.com/frontend/comment/list",
+				Referer: chapterURL,
+			}, form)
+			// Swallow per-page errors (the failure-modes table allows
+			// proceeding with whatever pages we already have).
+			if err != nil || len(presp.Body) == 0 {
+				break
+			}
+			frag, perr := html.Parse(bytes.NewReader(presp.Body))
+			if perr != nil {
+				break
+			}
+			pageComments := parseComments(frag)
+			if len(pageComments) == 0 {
+				break
+			}
+			out = append(out, pageComments...)
 		}
-		// Swallow page-2 errors (the failure-modes table allows
-		// proceeding with page 1 only).
 	}
 
-	return append(page1, page2...), nil
+	return out, nil
 }
 
 func parseComments(n *html.Node) []Comment {
