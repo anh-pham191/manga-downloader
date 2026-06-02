@@ -117,6 +117,7 @@ Flags:
 | `--name` | URL slug | Pass `--name "Friendly Title"` to control the filename |
 | `--concurrency` | `4` | Chapters in flight; drop to 2 if you get rate-limited |
 | `--from N` / `--to M` | none | Inclusive range filter (applies to image download in `resume` / `sync-manga`; ignored by `sync-comments`) |
+| `--refresh-comments` | off | `sync-comments` only: re-scrape and **replace** comments on **all** archived chapters, not just those missing comments. Warned and ignored in other modes. |
 | `--cookies` | platform default | Path to the cookie JSON file |
 | `--verbose` | off | Per-chapter progress to stderr |
 
@@ -131,6 +132,10 @@ bin/downloader resume "<manga-url>"
 
 # Backfill comment pages onto an existing archive (no new chapters)
 bin/downloader sync-comments "<manga-url>"
+
+# Re-scrape comments (up to 5 pages) and REPLACE them on EVERY archived
+# chapter — use as a one-off after the comment-page depth changed
+bin/downloader sync-comments --refresh-comments "<manga-url>"
 
 # Be polite on a small laptop / flaky connection
 bin/downloader sync-manga --concurrency 2 --verbose "<manga-url>"
@@ -212,6 +217,13 @@ Expect a single JSON line on stdout naming the server
   429, 5xx, and dial errors. 403 is treated as Cloudflare expiry and
   surfaced immediately.
 - **Politeness**: 200–500 ms jitter between successful requests.
+- **Comments**: each chapter's top-level comments are scraped (up to 5
+  pages, stopping early on the first empty page) and rendered into a
+  `zzz-comments.png` inside the chapter folder. Replies are not
+  scraped. New chapters get comments automatically; to refresh comments
+  on chapters already in the archive, use
+  `sync-comments --refresh-comments`, which replaces the existing
+  comments page rather than duplicating it.
 
 ---
 

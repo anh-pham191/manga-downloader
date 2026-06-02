@@ -69,10 +69,39 @@ func stageViaGoZip(cbzPath, scratchRoot string) error {
 
 	zw := zip.NewWriter(tmp)
 
-	// 1. Copy existing entries from cbzPath (if it exists) via raw.
+	// Read the .ok-marked scratch chapters first and compute the set of
+	// entry names they will write, so existing archive entries of the
+	// same name are dropped (replaced) rather than duplicated.
+	chapters, err := readMarkedChapters(scratchRoot)
+	if err != nil {
+		cleanup()
+		return err
+	}
+	sort.Strings(chapters)
+
+	scratchNames := map[string]bool{}
+	for _, ch := range chapters {
+		ents, err := os.ReadDir(filepath.Join(scratchRoot, ch))
+		if err != nil {
+			cleanup()
+			return err
+		}
+		for _, e := range ents {
+			if e.Name() == ".ok" || e.IsDir() {
+				continue
+			}
+			scratchNames[ch+"/"+e.Name()] = true
+		}
+	}
+
+	// 1. Copy existing entries from cbzPath (if it exists) via raw,
+	//    skipping any name a scratch chapter will overwrite.
 	if zr, err := zip.OpenReader(cbzPath); err == nil {
 		defer zr.Close()
 		for _, f := range zr.File {
+			if scratchNames[f.Name] {
+				continue
+			}
 			rc, err := f.OpenRaw()
 			if err != nil {
 				cleanup()
@@ -94,13 +123,7 @@ func stageViaGoZip(cbzPath, scratchRoot string) error {
 		return fmt.Errorf("open existing: %w", err)
 	}
 
-	// 2. Walk scratchRoot, include only .ok-marked chapter dirs.
-	chapters, err := readMarkedChapters(scratchRoot)
-	if err != nil {
-		cleanup()
-		return err
-	}
-	sort.Strings(chapters)
+	// 2. Append scratch entries (already gathered above).
 	for _, ch := range chapters {
 		chDir := filepath.Join(scratchRoot, ch)
 		ents, err := os.ReadDir(chDir)

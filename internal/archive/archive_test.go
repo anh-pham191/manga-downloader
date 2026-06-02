@@ -196,6 +196,125 @@ func TestStageAndRename_LargeArchiveTakesOSZipPath(t *testing.T) {
 	}
 }
 
+func TestStageAndRename_ReplacesExistingComments(t *testing.T) {
+	// Archive already has an image AND an old comments page for chap-0001.
+	p := buildCBZ(t, map[string][]byte{
+		"chap-0001/001.jpg":          []byte("AAA"),
+		"chap-0001/zzz-comments.png": []byte("OLD"),
+	})
+
+	// A refresh re-renders only the comments page (no images) into scratch.
+	scratch := t.TempDir()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(scratch, "chap-0001"), 0o755))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0001", "zzz-comments.png"), []byte("NEW"), 0o644))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0001", ".ok"), nil, 0o644))
+
+	if err := StageAndRename(p, scratch); err != nil {
+		t.Fatal(err)
+	}
+
+	zr, err := zip.OpenReader(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+
+	var commentEntries int
+	var commentBody string
+	var haveImage bool
+	for _, f := range zr.File {
+		switch f.Name {
+		case "chap-0001/zzz-comments.png":
+			commentEntries++
+			rc, _ := f.Open()
+			b, _ := io.ReadAll(rc)
+			rc.Close()
+			commentBody = string(b)
+		case "chap-0001/001.jpg":
+			haveImage = true
+		}
+	}
+	if commentEntries != 1 {
+		t.Fatalf("zzz-comments.png entries = %d, want 1 (replaced, not duplicated)", commentEntries)
+	}
+	if commentBody != "NEW" {
+		t.Errorf("comment body = %q, want NEW (scratch should win)", commentBody)
+	}
+	if !haveImage {
+		t.Error("chap-0001/001.jpg should be preserved untouched")
+	}
+}
+
+// TestStageAndRename_ReplacesExistingCommentsViaOSZip mirrors
+// TestStageAndRename_ReplacesExistingComments but forces the OS-zip
+// path by lowering zip64SafeThreshold below any real archive size,
+// proving that replace-not-duplicate holds for large back catalogues.
+func TestStageAndRename_ReplacesExistingCommentsViaOSZip(t *testing.T) {
+	// Force OS-zip path: any non-empty archive trips the threshold.
+	saved := zip64SafeThreshold
+	zip64SafeThreshold = 1
+	t.Cleanup(func() { zip64SafeThreshold = saved })
+
+	// Archive already has an image AND an old comments page for chap-0001.
+	p := buildCBZ(t, map[string][]byte{
+		"chap-0001/001.jpg":          []byte("AAA"),
+		"chap-0001/zzz-comments.png": []byte("OLD"),
+	})
+
+	// A refresh re-renders only the comments page (no images) into scratch.
+	scratch := t.TempDir()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(scratch, "chap-0001"), 0o755))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0001", "zzz-comments.png"), []byte("NEW"), 0o644))
+	must(ioutil.WriteFile(filepath.Join(scratch, "chap-0001", ".ok"), nil, 0o644))
+
+	if err := StageAndRename(p, scratch); err != nil {
+		t.Fatalf("StageAndRename via OS zip: %v", err)
+	}
+
+	zr, err := zip.OpenReader(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+
+	var commentEntries int
+	var commentBody string
+	var haveImage bool
+	for _, f := range zr.File {
+		switch f.Name {
+		case "chap-0001/zzz-comments.png":
+			commentEntries++
+			rc, _ := f.Open()
+			b, _ := io.ReadAll(rc)
+			rc.Close()
+			commentBody = string(b)
+		case "chap-0001/001.jpg":
+			haveImage = true
+		}
+	}
+	if commentEntries != 1 {
+		t.Fatalf("zzz-comments.png entries = %d, want 1 (replaced, not duplicated)", commentEntries)
+	}
+	if commentBody != "NEW" {
+		t.Errorf("comment body = %q, want NEW (scratch should win)", commentBody)
+	}
+	if !haveImage {
+		t.Error("chap-0001/001.jpg should be preserved untouched")
+	}
+}
+
 func TestStageAndRename_CreatesFreshIfTargetMissing(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "fresh.cbz")

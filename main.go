@@ -45,6 +45,7 @@ func main() {
 	verbose := fs.Bool("verbose", false, "per-chapter progress to stderr")
 	cookiesPath := fs.String("cookies", defaultCookiesPath(), "path to cookie JSON")
 	name := fs.String("name", "", "archive name (defaults to URL slug)")
+	refreshComments := fs.Bool("refresh-comments", false, "re-scrape & replace comments on already-archived chapters (sync-comments only)")
 	fs.Usage = usage
 	fs.Parse(os.Args[2:]) //nolint:errcheck // ExitOnError handles errors
 
@@ -53,6 +54,10 @@ func main() {
 		os.Exit(2)
 	}
 	mangaURL := fs.Arg(0)
+
+	if *refreshComments && mode != pipeline.SyncComments {
+		fmt.Fprintln(os.Stderr, "warning: --refresh-comments only applies to `sync-comments`; ignoring it for this mode")
+	}
 
 	slug, err := slugFromURL(mangaURL)
 	if err != nil {
@@ -81,17 +86,18 @@ func main() {
 	site := &sourcesite.Site{Fetcher: f}
 
 	err = pipeline.Run(context.Background(), pipeline.Opts{
-		Mode:        mode,
-		MangaURL:    mangaURL,
-		Root:        *out,
-		Name:        slug,
-		From:        *from,
-		To:          *to,
-		Concurrency: *concurrency,
-		Site:        site,
-		Fetcher:     f,
-		Verbose:     *verbose,
-		Logger:      log.New(os.Stderr, "", 0),
+		Mode:            mode,
+		MangaURL:        mangaURL,
+		Root:            *out,
+		Name:            slug,
+		From:            *from,
+		To:              *to,
+		Concurrency:     *concurrency,
+		Site:            site,
+		Fetcher:         f,
+		Verbose:         *verbose,
+		RefreshComments: *refreshComments,
+		Logger:          log.New(os.Stderr, "", 0),
 	})
 	switch {
 	case err == nil:
@@ -131,7 +137,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   downloader sync-manga    [flags] <manga-url>   download new chapters + comments + backfill missing comments
   downloader resume        [flags] <manga-url>   download new chapters + comments (no backfill)
-  downloader sync-comments [flags] <manga-url>   backfill comments on existing archive (no new chapters)
+  downloader sync-comments [flags] <manga-url>   backfill comments on existing archive (no new chapters; add --refresh-comments to re-scrape ALL chapters)
   downloader mcp           [flags]               run local MCP server over stdio for Claude Desktop
 
 flags:
@@ -141,7 +147,8 @@ flags:
   --from int             first chapter
   --to int               last chapter
   --cookies string       path to cookie JSON
-  --verbose              per-chapter progress`)
+  --verbose              per-chapter progress
+  --refresh-comments     re-scrape & replace comments on all archived chapters (sync-comments only)`)
 }
 
 func runMCP(args []string) error {

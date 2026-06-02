@@ -22,16 +22,17 @@ import (
 )
 
 type Opts struct {
-	Mode        Mode
-	MangaURL    string
-	Root        string
-	Name        string
-	From, To    int
-	Concurrency int
-	Site        site.Site
-	Fetcher     fetcher.Fetcher
-	Verbose     bool
-	Logger      *log.Logger
+	Mode            Mode
+	MangaURL        string
+	Root            string
+	Name            string
+	From, To        int
+	Concurrency     int
+	Site            site.Site
+	Fetcher         fetcher.Fetcher
+	Verbose         bool
+	RefreshComments bool
+	Logger          *log.Logger
 }
 
 var (
@@ -84,14 +85,14 @@ func Run(ctx context.Context, opts Opts) error {
 
 	var tasks []Task
 	if archiveWidth > 0 && archiveWidth < sourceWidth {
-		existing := Plan(opts.Mode, chapters, insp, archiveWidth)
+		existing := Plan(opts.Mode, chapters, insp, archiveWidth, opts.RefreshComments)
 		for _, t := range existing {
 			if insp.Have[t.Folder] {
 				tasks = append(tasks, t)
 			}
 		}
 		empty := archive.Inspection{Have: map[string]bool{}, HaveComments: map[string]bool{}}
-		novel := Plan(opts.Mode, chapters, empty, sourceWidth)
+		novel := Plan(opts.Mode, chapters, empty, sourceWidth, opts.RefreshComments)
 		for _, t := range novel {
 			if insp.Have[layout.Folder("", t.Number, archiveWidth)] {
 				continue
@@ -99,7 +100,7 @@ func Run(ctx context.Context, opts Opts) error {
 			tasks = append(tasks, t)
 		}
 	} else {
-		tasks = Plan(opts.Mode, chapters, insp, effectiveWidth)
+		tasks = Plan(opts.Mode, chapters, insp, effectiveWidth, opts.RefreshComments)
 	}
 
 	if len(tasks) == 0 {

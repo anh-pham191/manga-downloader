@@ -29,8 +29,10 @@ type Task struct {
 }
 
 // Plan converts (mode, source chapter list, archive inspection,
-// effective width) into the work list for the run.
-func Plan(mode Mode, chapters []site.Chapter, insp archive.Inspection, width int) []Task {
+// effective width, refresh) into the work list for the run. When
+// refresh is true, SyncComments re-renders comments for every
+// archived chapter, even those that already have a comments page.
+func Plan(mode Mode, chapters []site.Chapter, insp archive.Inspection, width int, refresh bool) []Task {
 	var out []Task
 	for _, c := range chapters {
 		folder := layout.Folder("", c.Number, width)
@@ -39,7 +41,7 @@ func Plan(mode Mode, chapters []site.Chapter, insp archive.Inspection, width int
 
 		switch mode {
 		case SyncComments:
-			if in && !hasComments {
+			if in && (refresh || !hasComments) {
 				out = append(out, Task{Folder: folder, Number: c.Number, URL: c.URL, Kind: Render})
 			}
 		case Resume:
