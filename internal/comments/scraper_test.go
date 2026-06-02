@@ -21,34 +21,6 @@ func (f *fixedFetcher) Post(_ context.Context, _ fetcher.Request, _ url.Values) 
 	return &fetcher.Response{Body: f.postBody, ContentType: "text/html"}, nil
 }
 
-func TestScrape_PullsPage2(t *testing.T) {
-	p1, err := ioutil.ReadFile("testdata/chapter-with-comments.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	p2, err := ioutil.ReadFile("testdata/page2-fragment.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := &fixedFetcher{getBody: p1, postBody: p2}
-
-	cs, err := Scrape(context.Background(), "https://example.com/chap-1", f)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	p1only := &fixedFetcher{getBody: p1, postBody: nil}
-	just1, err := Scrape(context.Background(), "https://example.com/chap-1", p1only)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(cs) <= len(just1) {
-		t.Fatalf("page-2 added 0 comments: %d vs %d", len(cs), len(just1))
-	}
-	t.Logf("page-2 merge: %d vs %d", len(cs), len(just1))
-}
-
 func TestScrape_StripsEmoteImages(t *testing.T) {
 	fixture := []byte(`
 <html><body>

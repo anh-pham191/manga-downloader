@@ -52,7 +52,7 @@ func Scrape(ctx context.Context, chapterURL string, f fetcher.Fetcher) ([]Commen
 			}, form)
 			// Swallow per-page errors (the failure-modes table allows
 			// proceeding with whatever pages we already have).
-			if err != nil || len(presp.Body) == 0 {
+			if err != nil || presp == nil || len(presp.Body) == 0 {
 				break
 			}
 			frag, perr := html.Parse(bytes.NewReader(presp.Body))
