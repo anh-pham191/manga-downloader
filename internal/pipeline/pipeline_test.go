@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"errors"
-	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
@@ -25,6 +24,9 @@ func (f *fakeSite) ListChapters(_ context.Context, _ string) ([]site.Chapter, er
 func (f *fakeSite) ChapterImages(_ context.Context, _ site.Chapter) ([]site.ImageRef, error) {
 	return []site.ImageRef{{URL: "https://example.com/x.jpg", Referer: "https://example.com/"}}, nil
 }
+func (f *fakeSite) Search(_ context.Context, _, _ string) ([]site.SearchHit, error) {
+	return nil, nil
+}
 
 type fakeFetcher struct {
 	chapterHTML []byte
@@ -42,7 +44,7 @@ func (f *fakeFetcher) Post(_ context.Context, _ fetcher.Request, _ url.Values) (
 }
 
 func TestRun_FreshSyncManga(t *testing.T) {
-	raw, err := ioutil.ReadFile("../comments/testdata/chapter-with-comments.html")
+	raw, err := os.ReadFile("../comments/testdata/chapter-with-comments.html")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,5 +111,75 @@ func TestRun_ConcurrentInvocationFailsFast(t *testing.T) {
 	err := Run(context.Background(), opts)
 	if !errors.Is(err, ErrAnotherInstance) {
 		t.Fatalf("err = %v, want ErrAnotherInstance", err)
+	}
+}
+
+func TestRunResult_CountsNewChapters(t *testing.T) {
+	raw, err := os.ReadFile("../comments/testdata/chapter-with-comments.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	opts := Opts{
+		Mode:        SyncManga,
+		MangaURL:    "https://example.com/manga",
+		Root:        root,
+		Name:        "m",
+		Concurrency: 2,
+		Site: &fakeSite{chs: []site.Chapter{
+			{Number: "1", URL: "https://example.com/manga/1"},
+			{Number: "2", URL: "https://example.com/manga/2"},
+		}},
+		Fetcher: &fakeFetcher{chapterHTML: raw, imageBytes: []byte("FAKEJPEG")},
+	}
+	res, err := RunResult(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NewChapters != 2 || res.Failed != 0 {
+		t.Fatalf("got %+v, want NewChapters=2 Failed=0", res)
+	}
+	// second run: nothing new
+	res, err = RunResult(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NewChapters != 0 {
+		t.Fatalf("second run should add 0 chapters, got %d", res.NewChapters)
+	}
+}
+
+func TestRunResult_ZeroResultOnStageFailure(t *testing.T) {
+	raw, err := os.ReadFile("../comments/testdata/chapter-with-comments.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	// Pre-create the .cbz path as a non-empty directory so StageAndRename
+	// fails when it tries to open/replace it as a zip archive.
+	cbzPath := filepath.Join(root, "m.cbz")
+	if err := os.MkdirAll(cbzPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cbzPath, "blocker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := Opts{
+		Mode:        SyncManga,
+		MangaURL:    "https://example.com/manga",
+		Root:        root,
+		Name:        "m",
+		Concurrency: 2,
+		Site: &fakeSite{chs: []site.Chapter{
+			{Number: "1", URL: "https://example.com/manga/1"},
+		}},
+		Fetcher: &fakeFetcher{chapterHTML: raw, imageBytes: []byte("FAKEJPEG")},
+	}
+	res, err := RunResult(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected staging to fail, got nil error")
+	}
+	if res != (Result{}) {
+		t.Fatalf("expected zero Result on stage failure, got %+v", res)
 	}
 }

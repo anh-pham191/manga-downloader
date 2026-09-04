@@ -31,6 +31,16 @@ func main() {
 		}
 		return
 	}
+	switch os.Args[1] {
+	case "register":
+		os.Exit(runRegister(os.Args[2:]))
+	case "list":
+		os.Exit(runList(os.Args[2:]))
+	case "update-all":
+		os.Exit(runUpdateAll(os.Args[2:]))
+	case "discover":
+		os.Exit(runDiscover(os.Args[2:]))
+	}
 	mode, ok := parseMode(os.Args[1])
 	if !ok {
 		usage()
@@ -83,7 +93,32 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Preflight the User-Agent before doing any real work. cf_clearance
+	// is bound to the UA of the browser that solved the challenge, and
+	// that browser drifts ahead of whatever was last pasted into
+	// cookies.json every time Chrome updates. Probing repairs the drift
+	// silently instead of failing the whole run with a 403.
+	if healed, changed, herr := f.HealUserAgent(context.Background(), mangaURL); herr != nil {
+		if errors.Is(herr, fetcher.ErrCloudflareExpired) {
+			fmt.Fprintln(os.Stderr,
+				"→ refresh cf_clearance in", *cookiesPath,
+				"and re-run with `resume` or `sync-manga`")
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, herr)
+		os.Exit(1)
+	} else if changed {
+		fmt.Fprintln(os.Stderr, "user-agent drifted; healed to:", healed)
+		if serr := fetcher.SaveUserAgent(*cookiesPath, healed); serr != nil {
+			fmt.Fprintln(os.Stderr, "warning: could not persist healed user-agent:", serr)
+		}
+	}
+
 	site := &sourcesite.Site{Fetcher: f}
+
+	if mode == pipeline.SyncManga {
+		recordURL(*out, slug, mangaURL)
+	}
 
 	err = pipeline.Run(context.Background(), pipeline.Opts{
 		Mode:            mode,
@@ -101,6 +136,9 @@ func main() {
 	})
 	switch {
 	case err == nil:
+		if mode == pipeline.SyncManga || mode == pipeline.Resume {
+			recordRun(*out, slug, mangaURL)
+		}
 		return
 	case errors.Is(err, pipeline.ErrAnotherInstance):
 		fmt.Fprintln(os.Stderr, "another downloader is running for", slug)
@@ -139,6 +177,10 @@ func usage() {
   downloader resume        [flags] <manga-url>   download new chapters + comments (no backfill)
   downloader sync-comments [flags] <manga-url>   backfill comments on existing archive (no new chapters; add --refresh-comments to re-scrape ALL chapters)
   downloader mcp           [flags]               run local MCP server over stdio for Claude Desktop
+  downloader update-all    [flags]               pull new chapters for every registered manga (uses resume)
+  downloader discover      [flags]               propose source URLs for archives missing from the registry
+  downloader register      <name> <manga-url>    add/fix a registry entry
+  downloader list                                show registered manga
 
 flags:
   --out string           root directory (default: ~/Documents/Manga)
@@ -148,7 +190,9 @@ flags:
   --to int               last chapter
   --cookies string       path to cookie JSON
   --verbose              per-chapter progress
-  --refresh-comments     re-scrape & replace comments on all archived chapters (sync-comments only)`)
+  --refresh-comments     re-scrape & replace comments on all archived chapters (sync-comments only)
+  --domain string        (update-all) new source host to apply if the stored one is unreachable
+  --site string          (discover) any URL on the source site (default https://truyenqqko.com/)`)
 }
 
 func runMCP(args []string) error {

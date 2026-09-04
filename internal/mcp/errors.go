@@ -15,6 +15,7 @@ const (
 	CodeNoArchive      = "NO_ARCHIVE"
 	CodeBadInput       = "BAD_INPUT"
 	CodeInternal       = "INTERNAL"
+	CodeDomainMoved    = "DOMAIN_MOVED"
 )
 
 // ToolError is a structured error returned from any tool handler.
@@ -58,6 +59,12 @@ func MapError(err error) *ToolError {
 		return &ToolError{
 			Code:    CodeNoArchive,
 			Message: "no archive found for this manga; use sync_manga to create one",
+			Cause:   err,
+		}
+	case errors.Is(err, pipeline.ErrDomainMoved):
+		return &ToolError{
+			Code:    CodeDomainMoved,
+			Message: "source host unreachable and no `domain` given; ask the user for the new host and call update_all again with `domain`",
 			Cause:   err,
 		}
 	default:

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/anhpham/downloader/internal/fetcher"
 	"github.com/anhpham/downloader/internal/pipeline"
+	"github.com/anhpham/downloader/internal/registry"
 	sourcesite "github.com/anhpham/downloader/internal/site/source"
 )
 
@@ -95,11 +97,92 @@ func (e *SyncExecutor) Run(ctx context.Context, mode pipeline.Mode, in SyncInput
 	if err := runner(runCtx, opts); err != nil {
 		return SyncOutput{}, MapError(err)
 	}
+	if mode != pipeline.SyncComments {
+		if reg, rerr := registry.Load(e.Root); rerr == nil {
+			reg.Upsert(name, in.URL)
+			reg.Touch(name, time.Now())
+			_ = reg.Save()
+		}
+	}
 	return SyncOutput{
 		Name:       name,
 		Mode:       modeLabel(mode),
 		DurationMS: time.Since(start).Milliseconds(),
 	}, nil
+}
+
+type UpdateAllInput struct {
+	Domain      string `json:"domain,omitempty" jsonschema:"New source host to apply if the stored one is unreachable"`
+	Concurrency int    `json:"concurrency,omitempty"`
+}
+
+type UpdateAllOutput struct {
+	Outcomes    []UpdateAllOutcome `json:"outcomes"`
+	DomainMoved bool               `json:"domain_moved"`
+	NewHost     string             `json:"new_host,omitempty"`
+}
+
+type UpdateAllOutcome struct {
+	Name          string `json:"name"`
+	NewChapters   int    `json:"new_chapters"`
+	MissingImages int    `json:"missing_images"`
+	Status        string `json:"status"`
+	Error         string `json:"error,omitempty"`
+}
+
+// updateAll runs pipeline.UpdateAll against every registered manga.
+func (s *Server) updateAll(ctx context.Context, in UpdateAllInput) (UpdateAllOutput, error) {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if _, err := s.sync.RunState.Acquire("*", "update-all", cancel); err != nil {
+		return UpdateAllOutput{}, err
+	}
+	defer s.sync.RunState.Release()
+
+	reg, err := registry.Load(s.opts.Root)
+	if err != nil {
+		return UpdateAllOutput{}, err
+	}
+	cf, err := fetcher.LoadCookieFile(s.sync.CookiesPath)
+	if err != nil {
+		return UpdateAllOutput{}, &ToolError{Code: CodeBadInput, Message: "cookie file unreadable; call update_cookie first", Cause: err}
+	}
+	f, err := fetcher.New(cf, fetcher.Options{})
+	if err != nil {
+		return UpdateAllOutput{}, err
+	}
+	if names := reg.Names(); len(names) > 0 {
+		first, _ := reg.Get(names[0])
+		if healed, changed, herr := f.HealUserAgent(runCtx, first.URL); herr != nil {
+			if errors.Is(herr, fetcher.ErrCloudflareExpired) {
+				return UpdateAllOutput{}, MapError(herr)
+			}
+			// A transport failure here is handled by UpdateAll's own
+			// preflight below; only bail on non-transport errors.
+			if fetcher.Classify(herr) != fetcher.KindHostUnreachable {
+				return UpdateAllOutput{}, herr
+			}
+		} else if changed {
+			_ = fetcher.SaveUserAgent(s.sync.CookiesPath, healed)
+		}
+	}
+	var ask func(string, error) string
+	if in.Domain != "" {
+		ask = func(string, error) string { return in.Domain }
+	}
+	res, err := pipeline.UpdateAll(runCtx, pipeline.UpdateAllOpts{
+		Root: s.opts.Root, Registry: reg, Site: &sourcesite.Site{Fetcher: f}, Fetcher: f,
+		Concurrency: defaultConcurrency(in.Concurrency), AskDomain: ask,
+	})
+	out := UpdateAllOutput{DomainMoved: res.DomainMoved, NewHost: res.NewHost}
+	for _, o := range res.Outcomes {
+		oo := UpdateAllOutcome{Name: o.Name, NewChapters: o.NewChapters, MissingImages: o.MissingImages, Status: o.Status}
+		if o.Err != nil {
+			oo.Error = o.Err.Error()
+		}
+		out.Outcomes = append(out.Outcomes, oo)
+	}
+	return out, err
 }
 
 func deriveName(rawURL string) string {
