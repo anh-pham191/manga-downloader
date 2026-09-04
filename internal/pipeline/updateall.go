@@ -128,7 +128,9 @@ func UpdateAll(ctx context.Context, o UpdateAllOpts) (UpdateAllResult, error) {
 		case errors.Is(err, fetcher.ErrCloudflareExpired):
 			out.Status, out.Err = "failed", err
 			res.Outcomes = append(res.Outcomes, out)
-			_ = o.Registry.Save()
+			if serr := o.Registry.Save(); serr != nil {
+				o.logf("save registry after cloudflare abort: %v", serr)
+			}
 			return res, err
 		case errors.Is(err, ErrNoArchive):
 			out.Status, out.Err = "no-archive", err

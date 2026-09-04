@@ -112,17 +112,28 @@ func (r *Registry) Names() []string {
 	return out
 }
 
-// SwapHost replaces rawURL's scheme+host with newHost's, keeping the
-// path and query untouched. newHost may be "example.com" (https
-// assumed) or "http://example.com".
-func SwapHost(rawURL, newHost string) (string, error) {
+// parseHost normalises newHost ("example.com" or "http://example.com",
+// https assumed when no scheme is given) into a *url.URL carrying only
+// a valid scheme+host, or an error if it can't be parsed as one.
+func parseHost(newHost string) (*url.URL, error) {
 	newHost = strings.TrimSpace(newHost)
 	if !strings.Contains(newHost, "://") {
 		newHost = "https://" + newHost
 	}
 	nu, err := url.Parse(newHost)
 	if err != nil || nu.Host == "" {
-		return "", fmt.Errorf("invalid host %q", newHost)
+		return nil, fmt.Errorf("invalid host %q", newHost)
+	}
+	return nu, nil
+}
+
+// SwapHost replaces rawURL's scheme+host with newHost's, keeping the
+// path and query untouched. newHost may be "example.com" (https
+// assumed) or "http://example.com".
+func SwapHost(rawURL, newHost string) (string, error) {
+	nu, err := parseHost(newHost)
+	if err != nil {
+		return "", err
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -134,19 +145,31 @@ func SwapHost(rawURL, newHost string) (string, error) {
 }
 
 // RewriteHost swaps the scheme+host of every stored URL. newHost may
-// be "example.com" (https assumed) or "http://example.com".
+// be "example.com" (https assumed) or "http://example.com". newHost is
+// validated up front (even for an empty registry), and the rewrite is
+// all-or-nothing: on any malformed stored URL, the registry is left
+// completely untouched and the error is returned.
 func (r *Registry) RewriteHost(newHost string) (int, error) {
-	n := 0
-	for name, e := range r.Manga {
-		swapped, err := SwapHost(e.URL, newHost)
-		if err != nil {
-			return n, err
-		}
-		e.URL = swapped
-		r.Manga[name] = e
-		n++
+	nu, err := parseHost(newHost)
+	if err != nil {
+		return 0, err
 	}
-	return n, nil
+	rewritten := make(map[string]string, len(r.Manga))
+	for name, e := range r.Manga {
+		u, err := url.Parse(e.URL)
+		if err != nil {
+			return 0, err
+		}
+		u.Scheme = nu.Scheme
+		u.Host = nu.Host
+		rewritten[name] = u.String()
+	}
+	for name, newURL := range rewritten {
+		e := r.Manga[name]
+		e.URL = newURL
+		r.Manga[name] = e
+	}
+	return len(rewritten), nil
 }
 
 // Root returns the manga root this registry was loaded from.

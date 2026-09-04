@@ -139,6 +139,35 @@ func TestSwapHost(t *testing.T) {
 	}
 }
 
+func TestRewriteHost_InvalidHostOnEmptyRegistry(t *testing.T) {
+	r, _ := Load(t.TempDir())
+	if _, err := r.RewriteHost("://bad"); err == nil {
+		t.Fatal("expected error for invalid host even on an empty registry")
+	}
+}
+
+func TestRewriteHost_MalformedEntryLeavesRegistryUntouched(t *testing.T) {
+	r, _ := Load(t.TempDir())
+	r.Upsert("Good", "https://old.example/good")
+	// Force a malformed stored URL directly (Upsert would parse fine
+	// for most strings, so inject one that url.Parse rejects outright).
+	e := r.Manga["Good"]
+	r.Manga["Bad"] = e
+	bad := r.Manga["Bad"]
+	bad.URL = "http://[::1:bad"
+	r.Manga["Bad"] = bad
+
+	if _, err := r.RewriteHost("new.example"); err == nil {
+		t.Fatal("expected error for malformed stored URL")
+	}
+	if r.Manga["Good"].URL != "https://old.example/good" {
+		t.Fatalf("good entry must be untouched on abort: %s", r.Manga["Good"].URL)
+	}
+	if r.Manga["Bad"].URL != "http://[::1:bad" {
+		t.Fatalf("bad entry must be untouched on abort: %s", r.Manga["Bad"].URL)
+	}
+}
+
 func TestLoad_CorruptFile(t *testing.T) {
 	root := t.TempDir()
 	os.WriteFile(filepath.Join(root, FileName), []byte("{not json"), 0o644)

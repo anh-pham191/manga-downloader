@@ -159,6 +159,21 @@ func TestUpdateAll_DomainMovedRewritesAndContinues(t *testing.T) {
 	if e2.URL != "https://new.example/truyen-tranh/a-1" {
 		t.Fatalf("rewrite not saved: %s", e2.URL)
 	}
+	// Preflight must probe only the first registered manga (twice: once
+	// against the old host, once to verify the candidate) before the
+	// main loop runs anything.
+	wantCalls := []string{
+		"https://old.example/truyen-tranh/a-1",
+		"https://new.example/truyen-tranh/a-1",
+	}
+	if len(s.calls) != len(wantCalls) {
+		t.Fatalf("ListChapters calls = %v, want %v", s.calls, wantCalls)
+	}
+	for i, want := range wantCalls {
+		if s.calls[i] != want {
+			t.Fatalf("call %d = %q, want %q", i, s.calls[i], want)
+		}
+	}
 }
 
 func TestUpdateAll_DomainMovedAbortWhenNoAnswer(t *testing.T) {
