@@ -125,6 +125,23 @@ func (s *Server) registerSyncTools() {
 	)
 	sdk.AddTool(s.sdk,
 		&sdk.Tool{
+			Name:        "update_all",
+			Description: "Pull new chapters for every registered manga (runs resume per manga). If it returns DOMAIN_MOVED, ask the user for the site's new host and call again with `domain`." + descSuffix,
+		},
+		func(ctx context.Context, req *sdk.CallToolRequest, in UpdateAllInput) (*sdk.CallToolResult, UpdateAllOutput, error) {
+			out, err := s.updateAll(ctx, in)
+			if err == nil {
+				return nil, out, nil
+			}
+			var te *ToolError
+			if errors.As(err, &te) {
+				return toolErr(te), UpdateAllOutput{}, nil
+			}
+			return toolErr(MapError(err)), UpdateAllOutput{}, nil
+		},
+	)
+	sdk.AddTool(s.sdk,
+		&sdk.Tool{
 			Name:        "cancel_run",
 			Description: "Cancel the in-flight sync, if any. Already-completed chapters survive via the scratch directory.",
 		},

@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/anhpham/downloader/internal/archive"
 	"github.com/anhpham/downloader/internal/pipeline"
+	"github.com/anhpham/downloader/internal/registry"
 )
 
 type MangaEntry struct {
@@ -19,6 +21,8 @@ type MangaEntry struct {
 	CommentsAttached int    `json:"comments_attached"`
 	MissingComments  int    `json:"missing_comments"`
 	ArchiveWidth     int    `json:"archive_width,omitempty"`
+	URL              string `json:"url,omitempty"`
+	LastSynced       string `json:"last_synced,omitempty"` // RFC3339
 }
 
 // ListManga walks root and returns one entry per *.cbz, sorted by name.
@@ -43,7 +47,21 @@ func ListManga(root string) ([]MangaEntry, error) {
 		out = append(out, entry)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	if reg, rerr := registry.Load(root); rerr == nil {
+		for i := range out {
+			fillRegistryFields(&out[i], reg)
+		}
+	}
 	return out, nil
+}
+
+func fillRegistryFields(e *MangaEntry, reg *registry.Registry) {
+	if en, ok := reg.Get(e.Name); ok {
+		e.URL = en.URL
+		if !en.LastSynced.IsZero() {
+			e.LastSynced = en.LastSynced.UTC().Format(time.RFC3339)
+		}
+	}
 }
 
 // InspectManga returns the entry for a single manga by name (without
@@ -55,7 +73,14 @@ func InspectManga(root, name string) (MangaEntry, error) {
 	} else if err != nil {
 		return MangaEntry{}, err
 	}
-	return buildEntry(root, name)
+	entry, err := buildEntry(root, name)
+	if err != nil {
+		return MangaEntry{}, err
+	}
+	if reg, rerr := registry.Load(root); rerr == nil {
+		fillRegistryFields(&entry, reg)
+	}
+	return entry, nil
 }
 
 func buildEntry(root, name string) (MangaEntry, error) {

@@ -30,8 +30,8 @@ func TestServer_Initialize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(tools.Tools) != 8 {
-		t.Fatalf("expected 8 tools after Task 9, got %d", len(tools.Tools))
+	if len(tools.Tools) != 9 {
+		t.Fatalf("expected 9 tools after Task 7 (update_all), got %d", len(tools.Tools))
 	}
 	_ = srv
 }

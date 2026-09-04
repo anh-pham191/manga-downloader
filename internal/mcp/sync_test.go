@@ -7,6 +7,7 @@ import (
 
 	"github.com/anhpham/downloader/internal/fetcher"
 	"github.com/anhpham/downloader/internal/pipeline"
+	"github.com/anhpham/downloader/internal/registry"
 )
 
 func TestRunSync_MapsCFExpired(t *testing.T) {
@@ -90,6 +91,43 @@ func TestRunSync_DerivesNameFromURL(t *testing.T) {
 	}
 	if out.Name != "gintama-216" {
 		t.Fatalf("derived name = %q", out.Name)
+	}
+}
+
+func TestSyncExecutor_RecordsRegistry(t *testing.T) {
+	root := t.TempDir()
+	exec := &SyncExecutor{
+		Root:        root,
+		CookiesPath: t.TempDir() + "/cookies.json",
+		RunState:    &RunState{},
+		runFn:       func(context.Context, pipeline.Opts) error { return nil },
+	}
+	seedCookieFile(t, exec.CookiesPath)
+	if _, err := exec.Run(context.Background(), pipeline.Resume, SyncInput{URL: "https://truyenqqko.com/truyen-tranh/gintama-216"}); err != nil {
+		t.Fatal(err)
+	}
+	reg, _ := registry.Load(root)
+	en, ok := reg.Get("gintama-216")
+	if !ok || en.URL != "https://truyenqqko.com/truyen-tranh/gintama-216" || en.LastSynced.IsZero() {
+		t.Fatalf("registry not recorded: %+v ok=%v", en, ok)
+	}
+}
+
+func TestSyncExecutor_DoesNotRecordSyncComments(t *testing.T) {
+	root := t.TempDir()
+	exec := &SyncExecutor{
+		Root:        root,
+		CookiesPath: t.TempDir() + "/cookies.json",
+		RunState:    &RunState{},
+		runFn:       func(context.Context, pipeline.Opts) error { return nil },
+	}
+	seedCookieFile(t, exec.CookiesPath)
+	if _, err := exec.Run(context.Background(), pipeline.SyncComments, SyncInput{URL: "https://truyenqqko.com/truyen-tranh/gintama-216"}); err != nil {
+		t.Fatal(err)
+	}
+	reg, _ := registry.Load(root)
+	if _, ok := reg.Get("gintama-216"); ok {
+		t.Fatal("sync_comments must not record to registry")
 	}
 }
 

@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/anhpham/downloader/internal/layout"
+	"github.com/anhpham/downloader/internal/registry"
 )
 
 func TestListManga_EmptyRoot(t *testing.T) {
@@ -54,6 +56,24 @@ func TestListAndInspect(t *testing.T) {
 
 	if _, err := InspectManga(root, "Nonesuch"); err == nil {
 		t.Fatal("expected NO_ARCHIVE for missing manga")
+	}
+}
+
+func TestListManga_IncludesRegistryURL(t *testing.T) {
+	root := t.TempDir()
+	writeFakeArchive(t, root, "A.cbz", []string{"chap-0001/001.jpg"})
+	reg, _ := registry.Load(root)
+	reg.Upsert("A", "https://truyenqqko.com/truyen-tranh/a-1")
+	reg.Touch("A", time.Date(2026, 9, 5, 1, 2, 3, 0, time.UTC))
+	if err := reg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	items, err := ListManga(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].URL != "https://truyenqqko.com/truyen-tranh/a-1" || items[0].LastSynced != "2026-09-05T01:02:03Z" {
+		t.Fatalf("items %+v", items)
 	}
 }
 
