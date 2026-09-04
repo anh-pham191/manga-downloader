@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -72,6 +73,10 @@ func runRegister(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	archivePath := filepath.Join(*out, name+".cbz")
+	if _, err := os.Stat(archivePath); errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "warning: no archive %s; update-all will report no-archive until sync-manga creates it\n", archivePath)
+	}
 	fmt.Printf("registered %s -> %s\n", name, u)
 	return 0
 }
@@ -120,7 +125,7 @@ func formatSummary(res pipeline.UpdateAllResult) string {
 		}
 		fmt.Fprintf(tw, "%s\t%d\t%s\n", o.Name, o.NewChapters, detail)
 		total += o.NewChapters
-		if o.Status == "failed" {
+		if o.Status == "failed" || o.Status == "no-archive" {
 			failed++
 		}
 	}
@@ -207,7 +212,7 @@ func runUpdateAll(args []string) int {
 	switch {
 	case err == nil:
 		for _, o := range res.Outcomes {
-			if o.Status == "failed" {
+			if o.Status == "failed" || o.Status == "no-archive" {
 				return 1
 			}
 		}
@@ -255,6 +260,10 @@ func runDiscover(args []string) int {
 
 	cf, err := fetcher.LoadCookieFile(*cookiesPath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			printCookieInstructions(*cookiesPath)
+			return 2
+		}
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}

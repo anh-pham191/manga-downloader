@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -148,6 +149,21 @@ func (s *Server) updateAll(ctx context.Context, in UpdateAllInput) (UpdateAllOut
 	f, err := fetcher.New(cf, fetcher.Options{})
 	if err != nil {
 		return UpdateAllOutput{}, err
+	}
+	if names := reg.Names(); len(names) > 0 {
+		first, _ := reg.Get(names[0])
+		if healed, changed, herr := f.HealUserAgent(runCtx, first.URL); herr != nil {
+			if errors.Is(herr, fetcher.ErrCloudflareExpired) {
+				return UpdateAllOutput{}, MapError(herr)
+			}
+			// A transport failure here is handled by UpdateAll's own
+			// preflight below; only bail on non-transport errors.
+			if fetcher.Classify(herr) != fetcher.KindHostUnreachable {
+				return UpdateAllOutput{}, herr
+			}
+		} else if changed {
+			_ = fetcher.SaveUserAgent(s.sync.CookiesPath, healed)
+		}
 	}
 	var ask func(string, error) string
 	if in.Domain != "" {
