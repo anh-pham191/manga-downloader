@@ -22,7 +22,7 @@ const FileName = ".registry.json"
 type Entry struct {
 	URL        string    `json:"url"`
 	Added      time.Time `json:"added"`
-	LastSynced time.Time `json:"last_synced,omitempty"`
+	LastSynced time.Time `json:"last_synced,omitzero"`
 }
 
 type Registry struct {
@@ -66,10 +66,7 @@ func (r *Registry) Save() error {
 	if err := lock.Lock(); err != nil {
 		return err
 	}
-	defer func() {
-		lock.Unlock()
-		os.Remove(lockPath)
-	}()
+	defer lock.Unlock()
 
 	b, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {

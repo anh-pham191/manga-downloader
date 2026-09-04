@@ -83,6 +83,27 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Preflight the User-Agent before doing any real work. cf_clearance
+	// is bound to the UA of the browser that solved the challenge, and
+	// that browser drifts ahead of whatever was last pasted into
+	// cookies.json every time Chrome updates. Probing repairs the drift
+	// silently instead of failing the whole run with a 403.
+	if healed, changed, herr := f.HealUserAgent(context.Background(), mangaURL); herr != nil {
+		if errors.Is(herr, fetcher.ErrCloudflareExpired) {
+			fmt.Fprintln(os.Stderr,
+				"→ refresh cf_clearance in", *cookiesPath,
+				"and re-run with `resume` or `sync-manga`")
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, herr)
+		os.Exit(1)
+	} else if changed {
+		fmt.Fprintln(os.Stderr, "user-agent drifted; healed to:", healed)
+		if serr := fetcher.SaveUserAgent(*cookiesPath, healed); serr != nil {
+			fmt.Fprintln(os.Stderr, "warning: could not persist healed user-agent:", serr)
+		}
+	}
+
 	site := &sourcesite.Site{Fetcher: f}
 
 	err = pipeline.Run(context.Background(), pipeline.Opts{

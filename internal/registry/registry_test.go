@@ -3,6 +3,7 @@ package registry
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,6 +21,9 @@ func TestLoad_MissingFileIsEmpty(t *testing.T) {
 func TestUpsertSaveLoadRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	r, _ := Load(root)
+	if r.Root() != root {
+		t.Fatal("Root() should return the loaded root")
+	}
 	r.Upsert("Gintama", "https://truyenqqko.com/truyen-tranh/gintama-216")
 	if err := r.Save(); err != nil {
 		t.Fatal(err)
@@ -30,6 +34,9 @@ func TestUpsertSaveLoadRoundTrip(t *testing.T) {
 	r2, err := Load(root)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if r2.Root() != root {
+		t.Fatal("Root() should return the loaded root after reload")
 	}
 	e, ok := r2.Get("Gintama")
 	if !ok || e.URL != "https://truyenqqko.com/truyen-tranh/gintama-216" {
@@ -129,8 +136,32 @@ func TestSave_NoTempLeftBehind(t *testing.T) {
 	}
 	entries, _ := os.ReadDir(root)
 	for _, e := range entries {
-		if e.Name() != FileName {
+		if e.Name() != FileName && e.Name() != FileName+".lock" {
 			t.Fatalf("unexpected file left in root: %s", e.Name())
 		}
+	}
+}
+
+func TestSave_OmitZeroLastSynced(t *testing.T) {
+	root := t.TempDir()
+	r, _ := Load(root)
+	r.Upsert("Unsynced", "https://x.com/unsynced")
+	r.Upsert("Synced", "https://x.com/synced")
+	r.Touch("Synced", time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC))
+	if err := r.Save(); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(root, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileStr := string(content)
+	// Unsynced entry must not contain last_synced field
+	if strings.Contains(fileStr, `"Unsynced"`) && strings.Contains(fileStr[strings.Index(fileStr, `"Unsynced"`):], `"last_synced"`) {
+		t.Fatal("Unsynced entry should not have last_synced field in JSON")
+	}
+	// Synced entry must contain last_synced field
+	if !strings.Contains(fileStr, `"last_synced"`) {
+		t.Fatal("Synced entry should have last_synced field in JSON")
 	}
 }
