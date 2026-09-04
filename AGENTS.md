@@ -29,6 +29,12 @@ acceptance criteria the v1 implementation was built against.
 - **403 = Cloudflare expiry.** The fetcher surfaces it as
   `fetcher.ErrCloudflareExpired`. Don't retry it; surface the
   refresh instructions.
+- **Registry is the source of truth for manga URLs.** `<root>/.registry.json`
+  (`internal/registry`). `update-all` never scans archives for URLs;
+  an archive without an entry is invisible to it until `register`ed.
+- **Domain-moved vs token-expired is decided by `fetcher.Classify`.**
+  403 → Cloudflare, always. DNS/connect/TLS → host unreachable. Only the
+  latter may prompt for a new domain. Don't merge these paths.
 
 ## Architecture seams
 
@@ -42,6 +48,10 @@ acceptance criteria the v1 implementation was built against.
 - **`downloader.Downloader`** — pure orchestration. Knows nothing
   about HTTP or selectors. Tested with `fakeSite` + `fakeFetcher`
   in `downloader_test.go`.
+- **`site.Site.Search`** — title search via `POST /frontend/search/search`
+  (form `search`, `type=0`). Used only by `discover`.
+- **`pipeline.UpdateAll`** — iterates the registry running `Resume`;
+  injectable `Runner`/`AskDomain` for tests.
 
 If you're adding a new source site, your work is almost entirely
 inside `internal/site/<sitename>/`. Don't reach into `downloader`

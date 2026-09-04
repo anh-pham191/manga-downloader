@@ -141,6 +141,25 @@ bin/downloader sync-comments --refresh-comments "<manga-url>"
 bin/downloader sync-manga --concurrency 2 --verbose "<manga-url>"
 ```
 
+## Keeping everything up to date
+
+The downloader remembers where each archive came from in
+`~/Documents/Manga/.registry.json`. Every successful `sync-manga` or
+`resume` records the URL automatically.
+
+    downloader list                  # what is registered, and when it last synced
+    downloader update-all            # resume every registered manga (new chapters only)
+    downloader register "Name" URL   # add or fix one entry by hand
+    downloader discover              # for archives with no entry: search the site and print candidate URLs
+
+If the source site changes domain, `update-all` detects that the old
+host is unreachable (DNS / connection / TLS failure, **not** a
+Cloudflare 403) and asks for the new host, then rewrites every stored
+URL. Non-interactive: `downloader update-all --domain newhost.com`.
+
+A Cloudflare 403 is always reported as an expired `cf_clearance`
+token and never triggers the domain prompt.
+
 Exit codes:
 
 - `0` — every chapter downloaded
