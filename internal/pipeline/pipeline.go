@@ -40,20 +40,33 @@ var (
 	ErrNoArchive       = errors.New("no archive to operate on")
 )
 
+// Result summarises one run for callers that aggregate (update-all).
+type Result struct {
+	NewChapters int // Kind==Both tasks that succeeded
+	Failed      int
+}
+
 // Run executes one mode end-to-end.
 func Run(ctx context.Context, opts Opts) error {
+	_, err := RunResult(ctx, opts)
+	return err
+}
+
+// RunResult is Run plus a count of what changed.
+func RunResult(ctx context.Context, opts Opts) (Result, error) {
+	var res Result
 	cbzPath := filepath.Join(opts.Root, opts.Name+".cbz")
 	lockPath := filepath.Join(opts.Root, opts.Name+".cbz.lock")
 	if err := os.MkdirAll(opts.Root, 0o755); err != nil {
-		return err
+		return res, err
 	}
 	lock := flock.New(lockPath)
 	got, err := lock.TryLock()
 	if err != nil {
-		return err
+		return res, err
 	}
 	if !got {
-		return ErrAnotherInstance
+		return res, ErrAnotherInstance
 	}
 	defer func() {
 		lock.Unlock()
@@ -62,15 +75,15 @@ func Run(ctx context.Context, opts Opts) error {
 
 	insp, err := archive.Inspect(cbzPath)
 	if err != nil {
-		return fmt.Errorf("inspect: %w", err)
+		return res, fmt.Errorf("inspect: %w", err)
 	}
 	if len(insp.Have) == 0 && opts.Mode != SyncManga {
-		return ErrNoArchive
+		return res, ErrNoArchive
 	}
 
 	chapters, err := opts.Site.ListChapters(ctx, opts.MangaURL)
 	if err != nil {
-		return fmt.Errorf("list chapters: %w", err)
+		return res, fmt.Errorf("list chapters: %w", err)
 	}
 
 	sourceWidth := layout.Width(chapters)
@@ -107,12 +120,12 @@ func Run(ctx context.Context, opts Opts) error {
 		if opts.Logger != nil {
 			opts.Logger.Println("nothing to do")
 		}
-		return nil
+		return res, nil
 	}
 
 	scratchRoot := filepath.Join(opts.Root, "."+opts.Name+".scratch")
 	if err := os.MkdirAll(scratchRoot, 0o755); err != nil {
-		return err
+		return res, err
 	}
 
 	failed := runTasks(ctx, tasks, scratchRoot, opts)
@@ -122,9 +135,19 @@ func Run(ctx context.Context, opts Opts) error {
 			opts.Logger.Printf("  %s: %v", f.Folder, f.Err)
 		}
 	}
+	res.Failed = len(failed)
+	failedSet := map[string]bool{}
+	for _, f := range failed {
+		failedSet[f.Folder] = true
+	}
+	for _, t := range tasks {
+		if t.Kind == Both && !failedSet[t.Folder] {
+			res.NewChapters++
+		}
+	}
 
 	if err := archive.StageAndRename(cbzPath, scratchRoot); err != nil {
-		return fmt.Errorf("stage: %w", err)
+		return res, fmt.Errorf("stage: %w", err)
 	}
 
 	// Always remove scratch after a successful stage — the .cbz is
@@ -134,12 +157,12 @@ func Run(ctx context.Context, opts Opts) error {
 	// failed attempts weren't reusable anyway: executeTask nukes
 	// each chapter dir before retrying).
 	if err := os.RemoveAll(scratchRoot); err != nil {
-		return err
+		return res, err
 	}
 	if len(failed) > 0 {
-		return fmt.Errorf("%d chapter(s) failed; re-run to retry", len(failed))
+		return res, fmt.Errorf("%d chapter(s) failed; re-run to retry", len(failed))
 	}
-	return nil
+	return res, nil
 }
 
 // TaskFailure records a single chapter task that didn't complete.

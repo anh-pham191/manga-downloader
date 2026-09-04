@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"errors"
-	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
@@ -45,7 +44,7 @@ func (f *fakeFetcher) Post(_ context.Context, _ fetcher.Request, _ url.Values) (
 }
 
 func TestRun_FreshSyncManga(t *testing.T) {
-	raw, err := ioutil.ReadFile("../comments/testdata/chapter-with-comments.html")
+	raw, err := os.ReadFile("../comments/testdata/chapter-with-comments.html")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,5 +111,40 @@ func TestRun_ConcurrentInvocationFailsFast(t *testing.T) {
 	err := Run(context.Background(), opts)
 	if !errors.Is(err, ErrAnotherInstance) {
 		t.Fatalf("err = %v, want ErrAnotherInstance", err)
+	}
+}
+
+func TestRunResult_CountsNewChapters(t *testing.T) {
+	raw, err := os.ReadFile("../comments/testdata/chapter-with-comments.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	opts := Opts{
+		Mode:        SyncManga,
+		MangaURL:    "https://example.com/manga",
+		Root:        root,
+		Name:        "m",
+		Concurrency: 2,
+		Site: &fakeSite{chs: []site.Chapter{
+			{Number: "1", URL: "https://example.com/manga/1"},
+			{Number: "2", URL: "https://example.com/manga/2"},
+		}},
+		Fetcher: &fakeFetcher{chapterHTML: raw, imageBytes: []byte("FAKEJPEG")},
+	}
+	res, err := RunResult(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NewChapters != 2 || res.Failed != 0 {
+		t.Fatalf("got %+v, want NewChapters=2 Failed=0", res)
+	}
+	// second run: nothing new
+	res, err = RunResult(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NewChapters != 0 {
+		t.Fatalf("second run should add 0 chapters, got %d", res.NewChapters)
 	}
 }
