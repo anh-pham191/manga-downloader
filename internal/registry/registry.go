@@ -112,26 +112,37 @@ func (r *Registry) Names() []string {
 	return out
 }
 
-// RewriteHost swaps the scheme+host of every stored URL. newHost may
-// be "example.com" (https assumed) or "http://example.com".
-func (r *Registry) RewriteHost(newHost string) (int, error) {
+// SwapHost replaces rawURL's scheme+host with newHost's, keeping the
+// path and query untouched. newHost may be "example.com" (https
+// assumed) or "http://example.com".
+func SwapHost(rawURL, newHost string) (string, error) {
 	newHost = strings.TrimSpace(newHost)
 	if !strings.Contains(newHost, "://") {
 		newHost = "https://" + newHost
 	}
 	nu, err := url.Parse(newHost)
 	if err != nil || nu.Host == "" {
-		return 0, fmt.Errorf("invalid host %q", newHost)
+		return "", fmt.Errorf("invalid host %q", newHost)
 	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	u.Scheme = nu.Scheme
+	u.Host = nu.Host
+	return u.String(), nil
+}
+
+// RewriteHost swaps the scheme+host of every stored URL. newHost may
+// be "example.com" (https assumed) or "http://example.com".
+func (r *Registry) RewriteHost(newHost string) (int, error) {
 	n := 0
 	for name, e := range r.Manga {
-		u, err := url.Parse(e.URL)
+		swapped, err := SwapHost(e.URL, newHost)
 		if err != nil {
-			continue
+			return n, err
 		}
-		u.Scheme = nu.Scheme
-		u.Host = nu.Host
-		e.URL = u.String()
+		e.URL = swapped
 		r.Manga[name] = e
 		n++
 	}

@@ -119,6 +119,26 @@ func TestRewriteHost(t *testing.T) {
 	}
 }
 
+func TestSwapHost(t *testing.T) {
+	got, err := SwapHost("https://truyenqqko.com/truyen-tranh/a-1?x=1", "truyenqqnew.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://truyenqqnew.com/truyen-tranh/a-1?x=1" {
+		t.Fatalf("got %q", got)
+	}
+	got, err = SwapHost("https://old.example/a", "http://new.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "http://new.example/a" {
+		t.Fatalf("explicit scheme not honoured: %q", got)
+	}
+	if _, err := SwapHost("https://old.example/a", "://bad"); err == nil {
+		t.Fatal("expected error for invalid host")
+	}
+}
+
 func TestLoad_CorruptFile(t *testing.T) {
 	root := t.TempDir()
 	os.WriteFile(filepath.Join(root, FileName), []byte("{not json"), 0o644)
