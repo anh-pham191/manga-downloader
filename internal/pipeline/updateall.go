@@ -100,8 +100,13 @@ func UpdateAll(ctx context.Context, o UpdateAllOpts) (UpdateAllResult, error) {
 			res.DomainMoved, res.NewHost = true, hostOf(candidate)
 			o.logf("registry rewritten to host %s", res.NewHost)
 		default:
-			// Not a transport failure and not Cloudflare: fall through and
-			// let the per-manga loop record it.
+			// Deliberate deviation from spec §3 step 2: the spec's preflight
+			// retries up to 3 registry entries before giving up. We don't,
+			// because a non-transport, non-Cloudflare error can never trigger
+			// a domain prompt here (only KindHostUnreachable does), so there
+			// is nothing a retry loop would accomplish beyond what the
+			// per-manga loop below already does for every entry. Fall
+			// through and let it record this one.
 			o.logf("preflight: %s: %v", names[0], err)
 		}
 	}

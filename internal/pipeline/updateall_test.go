@@ -97,12 +97,12 @@ func TestUpdateAll_CloudflareStopsImmediately(t *testing.T) {
 	reg := newReg(t, map[string]string{"A": "https://old.example/a", "B": "https://old.example/b"})
 	asked := false
 	_, err := UpdateAll(context.Background(), UpdateAllOpts{
-		Root:     reg.Root(),
-		Registry: reg,
-		Site:     &scriptedSite{errByHost: map[string]error{"old.example": fetcher.ErrCloudflareExpired}},
-		Fetcher:  nopFetcher{},
+		Root:      reg.Root(),
+		Registry:  reg,
+		Site:      &scriptedSite{errByHost: map[string]error{"old.example": fetcher.ErrCloudflareExpired}},
+		Fetcher:   nopFetcher{},
 		AskDomain: func(string, error) string { asked = true; return "new.example" },
-		Runner: func(context.Context, Opts) (Result, error) { t.Fatal("runner must not run"); return Result{}, nil },
+		Runner:    func(context.Context, Opts) (Result, error) { t.Fatal("runner must not run"); return Result{}, nil },
 	})
 	if !errors.Is(err, fetcher.ErrCloudflareExpired) {
 		t.Fatalf("want ErrCloudflareExpired, got %v", err)
@@ -124,10 +124,10 @@ func TestUpdateAll_DomainMovedRewritesAndContinues(t *testing.T) {
 	var gotOld string
 	var ranURLs []string
 	res, err := UpdateAll(context.Background(), UpdateAllOpts{
-		Root:     reg.Root(),
-		Registry: reg,
-		Site:     s,
-		Fetcher:  nopFetcher{},
+		Root:      reg.Root(),
+		Registry:  reg,
+		Site:      s,
+		Fetcher:   nopFetcher{},
 		AskDomain: func(oldHost string, _ error) string { gotOld = oldHost; return "new.example" },
 		Runner: func(_ context.Context, o Opts) (Result, error) {
 			ranURLs = append(ranURLs, o.MangaURL)
@@ -179,10 +179,10 @@ func TestUpdateAll_DomainMovedRewritesAndContinues(t *testing.T) {
 func TestUpdateAll_DomainMovedAbortWhenNoAnswer(t *testing.T) {
 	reg := newReg(t, map[string]string{"A": "https://old.example/a"})
 	_, err := UpdateAll(context.Background(), UpdateAllOpts{
-		Root:     reg.Root(),
-		Registry: reg,
-		Site:     &scriptedSite{errByHost: map[string]error{"old.example": &net.DNSError{Err: "no such host"}}},
-		Fetcher:  nopFetcher{},
+		Root:      reg.Root(),
+		Registry:  reg,
+		Site:      &scriptedSite{errByHost: map[string]error{"old.example": &net.DNSError{Err: "no such host"}}},
+		Fetcher:   nopFetcher{},
 		AskDomain: func(string, error) string { return "" },
 	})
 	if !errors.Is(err, ErrDomainMoved) {
