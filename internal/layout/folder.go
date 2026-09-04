@@ -85,7 +85,7 @@ func ImageName(index int, ext string) string {
 }
 
 var chapterFolderPattern = regexp.MustCompile(`^chap-\d+(-\d+)?$`)
-var imageEntryPattern = regexp.MustCompile(`^chap-\d+(-\d+)?/[^/]+\.(jpg|jpeg|png|webp)$`)
+var imageEntryPattern = regexp.MustCompile(`(?i)^chap-\d+(-\d+)?/[^/]+\.(jpg|jpeg|png|webp|gif|avif)$`)
 
 // IsImageEntry reports whether a zip-entry name matches the
 // downloader's image-name convention inside a chapter folder. The
