@@ -214,3 +214,50 @@ func TestSave_OmitZeroLastSynced(t *testing.T) {
 		t.Fatal("Synced entry should have last_synced field in JSON")
 	}
 }
+
+func TestSetFinished_RoundTrip(t *testing.T) {
+	root := t.TempDir()
+	r, _ := Load(root)
+	r.Upsert("A", "https://x.com/a")
+	r.Upsert("B", "https://x.com/b")
+	if !r.SetFinished("A", true) {
+		t.Fatal("SetFinished should report the entry exists")
+	}
+	if r.SetFinished("missing", true) {
+		t.Fatal("SetFinished must not create entries")
+	}
+	if err := r.Save(); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(root, FileName))
+	if !strings.Contains(string(raw), `"finished": true`) {
+		t.Fatalf("finished flag not persisted:\n%s", raw)
+	}
+	// B is not finished: the key must be omitted, not written as false.
+	if strings.Count(string(raw), `"finished"`) != 1 {
+		t.Fatalf("finished should appear once (A only):\n%s", raw)
+	}
+	r2, _ := Load(root)
+	if a, _ := r2.Get("A"); !a.Finished {
+		t.Fatal("A should be finished after reload")
+	}
+	if b, _ := r2.Get("B"); b.Finished {
+		t.Fatal("B should not be finished")
+	}
+	r2.SetFinished("A", false)
+	if a, _ := r2.Get("A"); a.Finished {
+		t.Fatal("unfinish failed")
+	}
+}
+
+func TestActiveNames_ExcludesFinished(t *testing.T) {
+	r, _ := Load(t.TempDir())
+	r.Upsert("b", "https://x.com/b")
+	r.Upsert("a", "https://x.com/a")
+	r.Upsert("c", "https://x.com/c")
+	r.SetFinished("b", true)
+	got := r.ActiveNames()
+	if len(got) != 2 || got[0] != "a" || got[1] != "c" {
+		t.Fatalf("ActiveNames = %v, want [a c]", got)
+	}
+}

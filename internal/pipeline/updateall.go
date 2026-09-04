@@ -33,7 +33,7 @@ type MangaOutcome struct {
 	Name          string
 	NewChapters   int
 	MissingImages int
-	Status        string // "ok", "no-archive", "busy", "failed", "skipped"
+	Status        string // "ok", "no-archive", "busy", "failed", "finished"
 	Err           error
 }
 
@@ -57,6 +57,15 @@ func UpdateAll(ctx context.Context, o UpdateAllOpts) (UpdateAllResult, error) {
 	if len(names) == 0 {
 		return res, nil
 	}
+	// Finished series are never probed; if nothing is active, report
+	// them and stop before touching the network.
+	active := o.Registry.ActiveNames()
+	if len(active) == 0 {
+		for _, name := range names {
+			res.Outcomes = append(res.Outcomes, MangaOutcome{Name: name, Status: "finished"})
+		}
+		return res, nil
+	}
 	now := o.Now
 	if now == nil {
 		now = time.Now
@@ -67,7 +76,7 @@ func UpdateAll(ctx context.Context, o UpdateAllOpts) (UpdateAllResult, error) {
 	}
 
 	// --- preflight on the first entry -------------------------------
-	first, _ := o.Registry.Get(names[0])
+	first, _ := o.Registry.Get(active[0])
 	if _, err := o.Site.ListChapters(ctx, first.URL); err != nil {
 		switch fetcher.Classify(err) {
 		case fetcher.KindCloudflare:
@@ -108,7 +117,7 @@ func UpdateAll(ctx context.Context, o UpdateAllOpts) (UpdateAllResult, error) {
 			// is nothing a retry loop would accomplish beyond what the
 			// per-manga loop below already does for every entry. Fall
 			// through and let it record this one.
-			o.logf("preflight: %s: %v", names[0], err)
+			o.logf("preflight: %s: %v", active[0], err)
 		}
 	}
 
@@ -116,6 +125,11 @@ func UpdateAll(ctx context.Context, o UpdateAllOpts) (UpdateAllResult, error) {
 	for _, name := range names {
 		e, _ := o.Registry.Get(name)
 		out := MangaOutcome{Name: name}
+		if e.Finished {
+			out.Status = "finished"
+			res.Outcomes = append(res.Outcomes, out)
+			continue
+		}
 		r, err := runner(ctx, Opts{
 			Mode:        Resume,
 			MangaURL:    e.URL,

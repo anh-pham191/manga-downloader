@@ -40,6 +40,10 @@ func main() {
 		os.Exit(runUpdateAll(os.Args[2:]))
 	case "discover":
 		os.Exit(runDiscover(os.Args[2:]))
+	case "finish":
+		os.Exit(runFinish(os.Args[2:], true))
+	case "unfinish":
+		os.Exit(runFinish(os.Args[2:], false))
 	}
 	mode, ok := parseMode(os.Args[1])
 	if !ok {
@@ -181,6 +185,8 @@ func usage() {
   downloader discover      [flags]               propose source URLs for archives missing from the registry
   downloader register      <name> <manga-url>    add/fix a registry entry
   downloader list                                show registered manga
+  downloader finish        <name>                mark a series finished (update-all skips it)
+  downloader unfinish      <name>                clear the finished mark
 
 flags:
   --out string           root directory (default: ~/Documents/Manga)

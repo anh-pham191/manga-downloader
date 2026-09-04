@@ -151,8 +151,8 @@ func (s *Server) updateAll(ctx context.Context, in UpdateAllInput) (UpdateAllOut
 	if err != nil {
 		return UpdateAllOutput{}, err
 	}
-	if names := reg.Names(); len(names) > 0 {
-		first, _ := reg.Get(names[0])
+	if active := reg.ActiveNames(); len(active) > 0 {
+		first, _ := reg.Get(active[0])
 		if healed, changed, herr := f.HealUserAgent(runCtx, first.URL); herr != nil {
 			if errors.Is(herr, fetcher.ErrCloudflareExpired) {
 				return UpdateAllOutput{}, MapError(herr)

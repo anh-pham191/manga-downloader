@@ -81,6 +81,42 @@ func runRegister(args []string) int {
 	return 0
 }
 
+// runFinish implements `finish` (finished=true) and `unfinish`
+// (finished=false): a finished series is skipped by update-all.
+func runFinish(args []string, finished bool) int {
+	verb := "finish"
+	if !finished {
+		verb = "unfinish"
+	}
+	fs := flag.NewFlagSet(verb, flag.ExitOnError)
+	out := fs.String("out", defaultOutDir(), "root directory for .cbz archives")
+	fs.Parse(args) //nolint:errcheck
+	if fs.NArg() != 1 {
+		fmt.Fprintf(os.Stderr, "usage: downloader %s [--out root] <name>\n", verb)
+		return 2
+	}
+	name := fs.Arg(0)
+	reg, err := registry.Load(*out)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if !reg.SetFinished(name, finished) {
+		fmt.Fprintf(os.Stderr, "%q is not registered; see `downloader list`\n", name)
+		return 1
+	}
+	if err := reg.Save(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if finished {
+		fmt.Printf("%s marked finished; update-all will skip it\n", name)
+	} else {
+		fmt.Printf("%s active again\n", name)
+	}
+	return 0
+}
+
 func runList(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	out := fs.String("out", defaultOutDir(), "root directory for .cbz archives")
@@ -91,14 +127,18 @@ func runList(args []string) int {
 		return 1
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tLAST SYNCED\tURL")
+	fmt.Fprintln(tw, "NAME\tFINISHED\tLAST SYNCED\tURL")
 	for _, n := range reg.Names() {
 		e, _ := reg.Get(n)
 		last := "never"
 		if !e.LastSynced.IsZero() {
 			last = e.LastSynced.Local().Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", n, last, e.URL)
+		fin := ""
+		if e.Finished {
+			fin = "yes"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", n, fin, last, e.URL)
 	}
 	tw.Flush()
 	return 0
@@ -117,7 +157,7 @@ func formatSummary(res pipeline.UpdateAllResult) string {
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tNEW\tMISSING IMG\tSTATUS")
-	total, failed, missing := 0, 0, 0
+	total, failed, missing, finished := 0, 0, 0, 0
 	for _, o := range res.Outcomes {
 		detail := o.Status
 		if o.Err != nil && o.Status != "ok" {
@@ -126,15 +166,18 @@ func formatSummary(res pipeline.UpdateAllResult) string {
 		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\n", o.Name, o.NewChapters, o.MissingImages, detail)
 		total += o.NewChapters
 		missing += o.MissingImages
-		if o.Status == "failed" || o.Status == "no-archive" {
+		switch o.Status {
+		case "failed", "no-archive":
 			failed++
+		case "finished":
+			finished++
 		}
 	}
 	tw.Flush()
 	if res.DomainMoved {
 		fmt.Fprintf(&b, "\nregistry host rewritten to %s\n", res.NewHost)
 	}
-	fmt.Fprintf(&b, "\nmanga: %d  new chapters: %d  missing images: %d  failed: %d\n", len(res.Outcomes), total, missing, failed)
+	fmt.Fprintf(&b, "\nmanga: %d  new chapters: %d  missing images: %d  finished: %d  failed: %d\n", len(res.Outcomes), total, missing, finished, failed)
 	return b.String()
 }
 
@@ -171,23 +214,26 @@ func runUpdateAll(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	firstName := reg.Names()[0]
-	first, _ := reg.Get(firstName)
 	ctx := context.Background()
-	if healed, changed, herr := f.HealUserAgent(ctx, first.URL); herr != nil {
-		if errors.Is(herr, fetcher.ErrCloudflareExpired) {
-			fmt.Fprintln(os.Stderr, "→ refresh cf_clearance in", *cookiesPath, "and re-run `update-all`")
-			return 1
+	// Probe the User-Agent against the first *active* entry; an all-finished
+	// registry must make no network request at all.
+	if active := reg.ActiveNames(); len(active) > 0 {
+		first, _ := reg.Get(active[0])
+		if healed, changed, herr := f.HealUserAgent(ctx, first.URL); herr != nil {
+			if errors.Is(herr, fetcher.ErrCloudflareExpired) {
+				fmt.Fprintln(os.Stderr, "→ refresh cf_clearance in", *cookiesPath, "and re-run `update-all`")
+				return 1
+			}
+			// A transport failure here is handled by UpdateAll's preflight; only
+			// bail on non-transport errors.
+			if fetcher.Classify(herr) != fetcher.KindHostUnreachable {
+				fmt.Fprintln(os.Stderr, herr)
+				return 1
+			}
+		} else if changed {
+			fmt.Fprintln(os.Stderr, "user-agent drifted; healed to:", healed)
+			_ = fetcher.SaveUserAgent(*cookiesPath, healed)
 		}
-		// A transport failure here is handled by UpdateAll's preflight; only
-		// bail on non-transport errors.
-		if fetcher.Classify(herr) != fetcher.KindHostUnreachable {
-			fmt.Fprintln(os.Stderr, herr)
-			return 1
-		}
-	} else if changed {
-		fmt.Fprintln(os.Stderr, "user-agent drifted; healed to:", healed)
-		_ = fetcher.SaveUserAgent(*cookiesPath, healed)
 	}
 
 	var logger *log.Logger
