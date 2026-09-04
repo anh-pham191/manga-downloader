@@ -30,10 +30,11 @@ type UpdateAllOpts struct {
 }
 
 type MangaOutcome struct {
-	Name        string
-	NewChapters int
-	Status      string // "ok", "no-archive", "busy", "failed", "skipped"
-	Err         error
+	Name          string
+	NewChapters   int
+	MissingImages int
+	Status        string // "ok", "no-archive", "busy", "failed", "skipped"
+	Err           error
 }
 
 type UpdateAllResult struct {
@@ -126,6 +127,7 @@ func UpdateAll(ctx context.Context, o UpdateAllOpts) (UpdateAllResult, error) {
 			Logger:      o.Logger,
 		})
 		out.NewChapters = r.NewChapters
+		out.MissingImages = r.MissingImages
 		switch {
 		case err == nil:
 			out.Status = "ok"

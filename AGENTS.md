@@ -26,6 +26,12 @@ acceptance criteria the v1 implementation was built against.
   chapter complete?" — written only after every image in the
   chapter has been atomically renamed into place. `--resume` looks
   for this file, never at image counts.
+- **One dead image does not fail a chapter.** `downloader.FetchChapterImages`
+  writes a placeholder PNG (`comments.RenderNotice`) in the slot of any
+  image whose fetch fails for a non-Cloudflare reason, reports it in the
+  returned `[]MissingImage`, and the chapter still gets its `.ok`. Only a
+  Cloudflare 403, a cancelled context, or *every* image failing is fatal.
+  Missing images are not retried on later runs — the chapter is complete.
 - **403 = Cloudflare expiry.** The fetcher surfaces it as
   `fetcher.ErrCloudflareExpired`. Don't retry it; surface the
   refresh instructions.

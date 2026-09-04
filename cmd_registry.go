@@ -116,15 +116,16 @@ func promptDomain(in io.Reader, out io.Writer) func(string, error) string {
 func formatSummary(res pipeline.UpdateAllResult) string {
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tNEW\tSTATUS")
-	total, failed := 0, 0
+	fmt.Fprintln(tw, "NAME\tNEW\tMISSING IMG\tSTATUS")
+	total, failed, missing := 0, 0, 0
 	for _, o := range res.Outcomes {
 		detail := o.Status
 		if o.Err != nil && o.Status != "ok" {
 			detail += ": " + o.Err.Error()
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\n", o.Name, o.NewChapters, detail)
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\n", o.Name, o.NewChapters, o.MissingImages, detail)
 		total += o.NewChapters
+		missing += o.MissingImages
 		if o.Status == "failed" || o.Status == "no-archive" {
 			failed++
 		}
@@ -133,7 +134,7 @@ func formatSummary(res pipeline.UpdateAllResult) string {
 	if res.DomainMoved {
 		fmt.Fprintf(&b, "\nregistry host rewritten to %s\n", res.NewHost)
 	}
-	fmt.Fprintf(&b, "\nmanga: %d  new chapters: %d  failed: %d\n", len(res.Outcomes), total, failed)
+	fmt.Fprintf(&b, "\nmanga: %d  new chapters: %d  missing images: %d  failed: %d\n", len(res.Outcomes), total, missing, failed)
 	return b.String()
 }
 

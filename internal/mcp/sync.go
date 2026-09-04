@@ -123,10 +123,11 @@ type UpdateAllOutput struct {
 }
 
 type UpdateAllOutcome struct {
-	Name        string `json:"name"`
-	NewChapters int    `json:"new_chapters"`
-	Status      string `json:"status"`
-	Error       string `json:"error,omitempty"`
+	Name          string `json:"name"`
+	NewChapters   int    `json:"new_chapters"`
+	MissingImages int    `json:"missing_images"`
+	Status        string `json:"status"`
+	Error         string `json:"error,omitempty"`
 }
 
 // updateAll runs pipeline.UpdateAll against every registered manga.
@@ -175,7 +176,7 @@ func (s *Server) updateAll(ctx context.Context, in UpdateAllInput) (UpdateAllOut
 	})
 	out := UpdateAllOutput{DomainMoved: res.DomainMoved, NewHost: res.NewHost}
 	for _, o := range res.Outcomes {
-		oo := UpdateAllOutcome{Name: o.Name, NewChapters: o.NewChapters, Status: o.Status}
+		oo := UpdateAllOutcome{Name: o.Name, NewChapters: o.NewChapters, MissingImages: o.MissingImages, Status: o.Status}
 		if o.Err != nil {
 			oo.Error = o.Err.Error()
 		}

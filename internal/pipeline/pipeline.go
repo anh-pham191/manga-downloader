@@ -42,8 +42,9 @@ var (
 
 // Result summarises one run for callers that aggregate (update-all).
 type Result struct {
-	NewChapters int // Kind==Both tasks that succeeded
-	Failed      int
+	NewChapters   int // Kind==Both tasks that succeeded
+	Failed        int
+	MissingImages int // images replaced by placeholder pages across all new chapters
 }
 
 // Run executes one mode end-to-end.
@@ -128,7 +129,8 @@ func RunResult(ctx context.Context, opts Opts) (Result, error) {
 		return res, err
 	}
 
-	failed := runTasks(ctx, tasks, scratchRoot, opts)
+	failed, missing := runTasks(ctx, tasks, scratchRoot, opts)
+	res.MissingImages = missing
 	if len(failed) > 0 && opts.Logger != nil {
 		opts.Logger.Printf("warning: %d chapter task(s) failed; staging the remainder", len(failed))
 		for _, f := range failed {
@@ -175,7 +177,7 @@ type TaskFailure struct {
 // returns the list of failures (empty on full success). Individual
 // task errors are NEVER fatal — partial progress is preserved via
 // `.ok` markers and the caller decides whether to stage what's done.
-func runTasks(ctx context.Context, tasks []Task, scratchRoot string, opts Opts) []TaskFailure {
+func runTasks(ctx context.Context, tasks []Task, scratchRoot string, opts Opts) (failures []TaskFailure, missing int) {
 	concurrency := opts.Concurrency
 	if concurrency < 1 {
 		concurrency = 1
@@ -183,7 +185,6 @@ func runTasks(ctx context.Context, tasks []Task, scratchRoot string, opts Opts) 
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var failures []TaskFailure
 
 	for _, t := range tasks {
 		t := t
@@ -195,53 +196,66 @@ func runTasks(ctx context.Context, tasks []Task, scratchRoot string, opts Opts) 
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if err := executeTask(ctx, t, scratchRoot, opts); err != nil {
-				mu.Lock()
+			n, err := executeTask(ctx, t, scratchRoot, opts)
+			mu.Lock()
+			missing += n
+			if err != nil {
 				failures = append(failures, TaskFailure{Folder: t.Folder, Err: err})
-				mu.Unlock()
 			}
+			mu.Unlock()
 		}()
 	}
 	wg.Wait()
-	return failures
+	return failures, missing
 }
 
-func executeTask(ctx context.Context, t Task, scratchRoot string, opts Opts) error {
+// executeTask downloads one chapter into the scratch dir. It returns
+// the number of images that were replaced by placeholder pages (the
+// chapter still counts as complete) alongside any fatal error.
+func executeTask(ctx context.Context, t Task, scratchRoot string, opts Opts) (int, error) {
 	chDir := filepath.Join(scratchRoot, t.Folder)
 	if err := os.RemoveAll(chDir); err != nil {
-		return err
+		return 0, err
 	}
 	if err := os.MkdirAll(chDir, 0o755); err != nil {
-		return err
+		return 0, err
 	}
 
+	missing := 0
 	if t.Kind == Both {
 		ch := site.Chapter{Number: t.Number, URL: t.URL}
-		if err := downloader.FetchChapterImages(ctx, ch, chDir, opts.Fetcher); err != nil {
-			return fmt.Errorf("fetch images %s: %w", t.Folder, err)
+		miss, err := downloader.FetchChapterImages(ctx, ch, chDir, opts.Fetcher)
+		if err != nil {
+			return 0, fmt.Errorf("fetch images %s: %w", t.Folder, err)
+		}
+		missing = len(miss)
+		if opts.Logger != nil {
+			for _, m := range miss {
+				opts.Logger.Printf("warning: %s image %d missing, placeholder written: %s: %v", t.Folder, m.Index, m.URL, m.Err)
+			}
 		}
 	}
 
 	cs, err := comments.Scrape(ctx, t.URL, opts.Fetcher)
 	if err != nil {
-		return fmt.Errorf("scrape %s: %w", t.Folder, err)
+		return 0, fmt.Errorf("scrape %s: %w", t.Folder, err)
 	}
 	if len(cs) > 0 {
 		f, err := os.Create(filepath.Join(chDir, layout.CommentsFilename))
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if err := comments.Render(cs, f); err != nil {
 			f.Close()
-			return fmt.Errorf("render %s: %w", t.Folder, err)
+			return 0, fmt.Errorf("render %s: %w", t.Folder, err)
 		}
 		if err := f.Close(); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
 	// .ok marker LAST.
-	return os.WriteFile(filepath.Join(chDir, ".ok"), nil, 0o644)
+	return missing, os.WriteFile(filepath.Join(chDir, ".ok"), nil, 0o644)
 }
 
 func filterRange(in []site.Chapter, from, to int) []site.Chapter {

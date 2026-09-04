@@ -160,6 +160,14 @@ URL. Non-interactive: `downloader update-all --domain newhost.com`.
 A Cloudflare 403 is always reported as an expired `cf_clearance`
 token and never triggers the domain prompt.
 
+## Missing images
+
+Source pages sometimes reference an image on a host that no longer
+exists. Rather than failing the chapter forever, the downloader writes
+a placeholder page ("Image N missing", with the host and reason) in
+that slot and archives the chapter as complete. The run log and the
+`update-all` summary report how many placeholders were written.
+
 Exit codes:
 
 - `0` — every chapter downloaded

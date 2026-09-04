@@ -14,12 +14,12 @@ import (
 
 func TestFormatSummary(t *testing.T) {
 	res := pipeline.UpdateAllResult{Outcomes: []pipeline.MangaOutcome{
-		{Name: "Gintama", NewChapters: 2, Status: "ok"},
+		{Name: "Gintama", NewChapters: 2, MissingImages: 3, Status: "ok"},
 		{Name: "Naruto", Status: "no-archive", Err: pipeline.ErrNoArchive},
 		{Name: "One Piece", Status: "failed", Err: errors.New("boom")},
 	}}
 	s := formatSummary(res)
-	for _, want := range []string{"Gintama", "2", "ok", "Naruto", "no-archive", "One Piece", "failed", "boom", "new chapters: 2", "failed: 2"} {
+	for _, want := range []string{"Gintama", "2", "ok", "Naruto", "no-archive", "One Piece", "failed", "boom", "new chapters: 2", "missing images: 3", "failed: 2", "MISSING IMG"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("summary missing %q:\n%s", want, s)
 		}
