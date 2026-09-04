@@ -33,7 +33,7 @@ type MangaOutcome struct {
 	Name          string
 	NewChapters   int
 	MissingImages int
-	Status        string // "ok", "no-archive", "busy", "failed", "skipped"
+	Status        string // "ok", "no-archive", "busy", "failed", "finished"
 	Err           error
 }
 
