@@ -148,3 +148,38 @@ func TestRunResult_CountsNewChapters(t *testing.T) {
 		t.Fatalf("second run should add 0 chapters, got %d", res.NewChapters)
 	}
 }
+
+func TestRunResult_ZeroResultOnStageFailure(t *testing.T) {
+	raw, err := os.ReadFile("../comments/testdata/chapter-with-comments.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	// Pre-create the .cbz path as a non-empty directory so StageAndRename
+	// fails when it tries to open/replace it as a zip archive.
+	cbzPath := filepath.Join(root, "m.cbz")
+	if err := os.MkdirAll(cbzPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cbzPath, "blocker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := Opts{
+		Mode:        SyncManga,
+		MangaURL:    "https://example.com/manga",
+		Root:        root,
+		Name:        "m",
+		Concurrency: 2,
+		Site: &fakeSite{chs: []site.Chapter{
+			{Number: "1", URL: "https://example.com/manga/1"},
+		}},
+		Fetcher: &fakeFetcher{chapterHTML: raw, imageBytes: []byte("FAKEJPEG")},
+	}
+	res, err := RunResult(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected staging to fail, got nil error")
+	}
+	if res != (Result{}) {
+		t.Fatalf("expected zero Result on stage failure, got %+v", res)
+	}
+}

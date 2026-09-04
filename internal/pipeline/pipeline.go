@@ -147,7 +147,7 @@ func RunResult(ctx context.Context, opts Opts) (Result, error) {
 	}
 
 	if err := archive.StageAndRename(cbzPath, scratchRoot); err != nil {
-		return res, fmt.Errorf("stage: %w", err)
+		return Result{}, fmt.Errorf("stage: %w", err)
 	}
 
 	// Always remove scratch after a successful stage — the .cbz is
