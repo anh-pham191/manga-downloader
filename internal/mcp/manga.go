@@ -23,6 +23,7 @@ type MangaEntry struct {
 	ArchiveWidth     int    `json:"archive_width,omitempty"`
 	URL              string `json:"url,omitempty"`
 	LastSynced       string `json:"last_synced,omitempty"` // RFC3339
+	Finished         bool   `json:"finished,omitempty"`
 }
 
 // ListManga walks root and returns one entry per *.cbz, sorted by name.
@@ -58,6 +59,7 @@ func ListManga(root string) ([]MangaEntry, error) {
 func fillRegistryFields(e *MangaEntry, reg *registry.Registry) {
 	if en, ok := reg.Get(e.Name); ok {
 		e.URL = en.URL
+		e.Finished = en.Finished
 		if !en.LastSynced.IsZero() {
 			e.LastSynced = en.LastSynced.UTC().Format(time.RFC3339)
 		}

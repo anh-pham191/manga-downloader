@@ -151,6 +151,8 @@ The downloader remembers where each archive came from in
     downloader update-all            # resume every registered manga (new chapters only)
     downloader register "Name" URL   # add or fix one entry by hand
     downloader discover              # for archives with no entry: search the site and print candidate URLs
+    downloader finish "Name"         # completed series: update-all skips it (no network request)
+    downloader unfinish "Name"       # series resumed: poll it again
 
 If the source site changes domain, `update-all` detects that the old
 host is unreachable (DNS / connection / TLS failure, **not** a

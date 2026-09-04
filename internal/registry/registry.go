@@ -23,6 +23,8 @@ type Entry struct {
 	URL        string    `json:"url"`
 	Added      time.Time `json:"added"`
 	LastSynced time.Time `json:"last_synced,omitzero"`
+	// Finished marks a completed series: update-all skips it entirely.
+	Finished bool `json:"finished,omitempty"`
 }
 
 type Registry struct {
@@ -96,6 +98,29 @@ func (r *Registry) Touch(name string, at time.Time) {
 	}
 	e.LastSynced = at
 	r.Manga[name] = e
+}
+
+// SetFinished sets or clears the finished flag. Returns false if the
+// name is not registered (nothing is created).
+func (r *Registry) SetFinished(name string, finished bool) bool {
+	e, ok := r.Manga[name]
+	if !ok {
+		return false
+	}
+	e.Finished = finished
+	r.Manga[name] = e
+	return true
+}
+
+// ActiveNames is Names() minus finished entries.
+func (r *Registry) ActiveNames() []string {
+	var out []string
+	for _, n := range r.Names() {
+		if !r.Manga[n].Finished {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 func (r *Registry) Get(name string) (Entry, bool) {

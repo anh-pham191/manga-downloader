@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -266,5 +267,58 @@ func TestUpdateAll_EmptyRegistry(t *testing.T) {
 	res, err := UpdateAll(context.Background(), UpdateAllOpts{Root: reg.Root(), Registry: reg, Site: &scriptedSite{}, Fetcher: nopFetcher{}})
 	if err != nil || len(res.Outcomes) != 0 {
 		t.Fatalf("empty registry should be a no-op, got %+v %v", res, err)
+	}
+}
+
+func TestUpdateAll_SkipsFinished(t *testing.T) {
+	reg := newReg(t, map[string]string{
+		"A": "https://h.example/a", "B": "https://h.example/b", "C": "https://h.example/c",
+	})
+	reg.SetFinished("A", true) // A is first alphabetically: preflight must not probe it
+	reg.SetFinished("C", true)
+	s := &scriptedSite{chapters: []site.Chapter{{Number: "1", URL: "x"}}}
+	var ran []string
+	res, err := UpdateAll(context.Background(), UpdateAllOpts{
+		Root: reg.Root(), Registry: reg, Site: s, Fetcher: nopFetcher{},
+		Runner: func(_ context.Context, o Opts) (Result, error) {
+			ran = append(ran, o.Name)
+			return Result{NewChapters: 1}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ran) != 1 || ran[0] != "B" {
+		t.Fatalf("only B should run, ran %v", ran)
+	}
+	for _, u := range s.calls {
+		if strings.Contains(u, "/a") || strings.Contains(u, "/c") {
+			t.Fatalf("finished manga must not be probed: %v", s.calls)
+		}
+	}
+	if len(res.Outcomes) != 3 {
+		t.Fatalf("all entries should appear in outcomes, got %d", len(res.Outcomes))
+	}
+	want := map[string]string{"A": "finished", "B": "ok", "C": "finished"}
+	for _, o := range res.Outcomes {
+		if o.Status != want[o.Name] {
+			t.Fatalf("%s status %q want %q", o.Name, o.Status, want[o.Name])
+		}
+	}
+	if a, _ := reg.Get("A"); !a.LastSynced.IsZero() {
+		t.Fatal("finished entries must not be touched")
+	}
+}
+
+func TestUpdateAll_AllFinishedIsNoop(t *testing.T) {
+	reg := newReg(t, map[string]string{"A": "https://h.example/a"})
+	reg.SetFinished("A", true)
+	s := &scriptedSite{}
+	res, err := UpdateAll(context.Background(), UpdateAllOpts{
+		Root: reg.Root(), Registry: reg, Site: s, Fetcher: nopFetcher{},
+		Runner: func(context.Context, Opts) (Result, error) { t.Fatal("runner must not run"); return Result{}, nil },
+	})
+	if err != nil || len(s.calls) != 0 || len(res.Outcomes) != 1 || res.Outcomes[0].Status != "finished" {
+		t.Fatalf("res=%+v err=%v calls=%v", res, err, s.calls)
 	}
 }

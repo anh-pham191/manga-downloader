@@ -95,3 +95,43 @@ func TestPromptDomain_EmptyAborts(t *testing.T) {
 		t.Fatalf("expected abort, got %q", got)
 	}
 }
+
+func TestRunFinish_SetsAndClearsFlag(t *testing.T) {
+	dir := t.TempDir()
+	if code := runRegister([]string{"--out", dir, "Naruto", "https://example.com/manga/naruto"}); code != 0 {
+		t.Fatalf("register exit %d", code)
+	}
+	if code := runFinish([]string{"--out", dir, "Naruto"}, true); code != 0 {
+		t.Fatalf("finish exit %d", code)
+	}
+	reg, _ := registry.Load(dir)
+	if e, _ := reg.Get("Naruto"); !e.Finished {
+		t.Fatal("finish did not set the flag")
+	}
+	if code := runFinish([]string{"--out", dir, "Naruto"}, false); code != 0 {
+		t.Fatalf("unfinish exit %d", code)
+	}
+	reg, _ = registry.Load(dir)
+	if e, _ := reg.Get("Naruto"); e.Finished {
+		t.Fatal("unfinish did not clear the flag")
+	}
+}
+
+func TestRunFinish_UnknownNameFails(t *testing.T) {
+	dir := t.TempDir()
+	var code int
+	stderr := captureStderr(t, func() { code = runFinish([]string{"--out", dir, "Nope"}, true) })
+	if code == 0 || !strings.Contains(stderr, "not registered") {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+}
+
+func TestFormatSummary_FinishedNotCountedAsFailure(t *testing.T) {
+	s := formatSummary(pipeline.UpdateAllResult{Outcomes: []pipeline.MangaOutcome{
+		{Name: "Slam Dunk", Status: "finished"},
+		{Name: "One Piece", NewChapters: 1, Status: "ok"},
+	}})
+	if !strings.Contains(s, "finished") || !strings.Contains(s, "failed: 0") || !strings.Contains(s, "finished: 1") {
+		t.Fatalf("summary:\n%s", s)
+	}
+}
