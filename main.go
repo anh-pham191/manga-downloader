@@ -31,6 +31,16 @@ func main() {
 		}
 		return
 	}
+	switch os.Args[1] {
+	case "register":
+		os.Exit(runRegister(os.Args[2:]))
+	case "list":
+		os.Exit(runList(os.Args[2:]))
+	case "update-all":
+		os.Exit(runUpdateAll(os.Args[2:]))
+	case "discover":
+		os.Exit(runDiscover(os.Args[2:]))
+	}
 	mode, ok := parseMode(os.Args[1])
 	if !ok {
 		usage()
@@ -106,6 +116,10 @@ func main() {
 
 	site := &sourcesite.Site{Fetcher: f}
 
+	if mode == pipeline.SyncManga {
+		recordURL(*out, slug, mangaURL)
+	}
+
 	err = pipeline.Run(context.Background(), pipeline.Opts{
 		Mode:            mode,
 		MangaURL:        mangaURL,
@@ -122,6 +136,9 @@ func main() {
 	})
 	switch {
 	case err == nil:
+		if mode == pipeline.SyncManga || mode == pipeline.Resume {
+			recordRun(*out, slug, mangaURL)
+		}
 		return
 	case errors.Is(err, pipeline.ErrAnotherInstance):
 		fmt.Fprintln(os.Stderr, "another downloader is running for", slug)
@@ -160,6 +177,10 @@ func usage() {
   downloader resume        [flags] <manga-url>   download new chapters + comments (no backfill)
   downloader sync-comments [flags] <manga-url>   backfill comments on existing archive (no new chapters; add --refresh-comments to re-scrape ALL chapters)
   downloader mcp           [flags]               run local MCP server over stdio for Claude Desktop
+  downloader update-all    [flags]               pull new chapters for every registered manga (uses resume)
+  downloader discover      [flags]               propose source URLs for archives missing from the registry
+  downloader register      <name> <manga-url>    add/fix a registry entry
+  downloader list                                show registered manga
 
 flags:
   --out string           root directory (default: ~/Documents/Manga)
@@ -169,7 +190,9 @@ flags:
   --to int               last chapter
   --cookies string       path to cookie JSON
   --verbose              per-chapter progress
-  --refresh-comments     re-scrape & replace comments on all archived chapters (sync-comments only)`)
+  --refresh-comments     re-scrape & replace comments on all archived chapters (sync-comments only)
+  --domain string        (update-all) new source host to apply if the stored one is unreachable
+  --site string          (discover) any URL on the source site (default https://truyenqqko.com/)`)
 }
 
 func runMCP(args []string) error {
