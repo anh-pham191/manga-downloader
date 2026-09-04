@@ -196,4 +196,7 @@ func TestSaveUserAgentPreservesCookies(t *testing.T) {
 	if len(cf.Cookies) != 1 || cf.Cookies[0].Value != "tok" {
 		t.Fatalf("cookies clobbered: %+v", cf.Cookies)
 	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("expected no leftover .tmp file, stat err = %v", err)
+	}
 }
