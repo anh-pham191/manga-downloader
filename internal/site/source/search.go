@@ -46,5 +46,8 @@ func (s *Site) Search(ctx context.Context, baseURL, query string) ([]site.Search
 	if err != nil {
 		return nil, fmt.Errorf("search %q: %w", query, err)
 	}
+	if resp == nil {
+		return nil, nil
+	}
 	return ParseSearch(string(resp.Body))
 }

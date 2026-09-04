@@ -69,3 +69,23 @@ func TestSite_Search_PostsToEndpoint(t *testing.T) {
 		t.Fatalf("expected 2 hits, got %d", len(hits))
 	}
 }
+
+type nilFetcher struct{}
+
+func (nilFetcher) Get(_ context.Context, _ fetcher.Request) (*fetcher.Response, error) {
+	return nil, nil
+}
+func (nilFetcher) Post(_ context.Context, _ fetcher.Request, _ url.Values) (*fetcher.Response, error) {
+	return nil, nil
+}
+
+func TestSite_Search_NilResponse(t *testing.T) {
+	s := &Site{Fetcher: nilFetcher{}}
+	hits, err := s.Search(context.Background(), "https://truyenqqko.com/truyen-tranh/anything-1", "gintama")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("expected no hits, got %d", len(hits))
+	}
+}
