@@ -16,9 +16,19 @@ type ImageRef struct {
 	Referer string
 }
 
+// SearchHit is one result from the site's title search.
+type SearchHit struct {
+	Title string
+	URL   string
+}
+
 // Site is a per-source-site adapter: it knows the URL conventions
 // and HTML selectors of one site, and nothing else.
 type Site interface {
 	ListChapters(ctx context.Context, mangaURL string) ([]Chapter, error)
 	ChapterImages(ctx context.Context, chapter Chapter) ([]ImageRef, error)
+
+	// Search queries the site's title search. baseURL is any URL on the
+	// site; the adapter derives scheme+host from it.
+	Search(ctx context.Context, baseURL, query string) ([]SearchHit, error)
 }

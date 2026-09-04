@@ -25,6 +25,9 @@ func (f *fakeSite) ListChapters(_ context.Context, _ string) ([]site.Chapter, er
 func (f *fakeSite) ChapterImages(_ context.Context, _ site.Chapter) ([]site.ImageRef, error) {
 	return []site.ImageRef{{URL: "https://example.com/x.jpg", Referer: "https://example.com/"}}, nil
 }
+func (f *fakeSite) Search(_ context.Context, _, _ string) ([]site.SearchHit, error) {
+	return nil, nil
+}
 
 type fakeFetcher struct {
 	chapterHTML []byte
