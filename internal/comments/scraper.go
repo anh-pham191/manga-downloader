@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"image"
 	"net/url"
 	"strconv"
 	"strings"
@@ -67,6 +68,18 @@ func Scrape(ctx context.Context, chapterURL string, f fetcher.Fetcher) ([]Commen
 		}
 	}
 
+	for i := range out {
+		c := &out[i]
+		if len(c.emoteURLs) == 0 {
+			continue
+		}
+		c.Emotes = make([]image.Image, len(c.emoteURLs))
+		for j, u := range c.emoteURLs {
+			c.Emotes[j] = loadEmote(ctx, u, f)
+		}
+		c.emoteURLs = nil
+	}
+
 	return out, nil
 }
 
@@ -96,7 +109,9 @@ func parseComments(n *html.Node) []Comment {
 			return x.Type == html.ElementNode && x.Data == "div" &&
 				hasClass(x, "content-comment")
 		}); body != nil {
-			c.Body = norm.NFC.String(strings.TrimSpace(textOfStrippingEmoteImages(body)))
+			text, urls := textWithEmotePlaceholders(body)
+			c.Body = norm.NFC.String(strings.TrimSpace(text))
+			c.emoteURLs = urls
 		}
 		if likes := findFirst(node, func(x *html.Node) bool {
 			return x.Type == html.ElementNode && x.Data == "span" &&
@@ -191,20 +206,34 @@ func textOf(n *html.Node) string {
 	return sb.String()
 }
 
-func textOfStrippingEmoteImages(n *html.Node) string {
+// textWithEmotePlaceholders flattens a comment body to text, swapping
+// each emote <img> for emoteRune(i) and returning the image URLs in
+// slot order. <img> tags without a fetchable URL are dropped, as are
+// slots past the PUA range (a comment with 6400 emotes is spam).
+func textWithEmotePlaceholders(n *html.Node) (string, []string) {
 	var sb strings.Builder
+	var urls []string
 	var rec func(*html.Node)
 	rec = func(x *html.Node) {
 		if x.Type == html.ElementNode && x.Data == "img" {
+			if u := emoteSrc(x); u != "" && len(urls) < emoteMax {
+				sb.WriteRune(emoteRune(len(urls)))
+				urls = append(urls, u)
+			}
 			return
 		}
 		if x.Type == html.TextNode {
-			sb.WriteString(x.Data)
+			sb.WriteString(strings.Map(func(r rune) rune {
+				if isPUA(r) {
+					return -1
+				}
+				return r
+			}, x.Data))
 		}
 		for c := x.FirstChild; c != nil; c = c.NextSibling {
 			rec(c)
 		}
 	}
 	rec(n)
-	return sb.String()
+	return sb.String(), urls
 }

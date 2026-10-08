@@ -74,6 +74,12 @@ sorts it last in the `.cbz`). Logic lives in `internal/comments/`.
   only. Nested replies — the "N phản hồi" expanders loaded in the
   browser via `loadReply(<id>)` — are **deliberately not fetched** and
   are not in the archive. Don't assume replies are covered.
+- **Site emotes render as still images.** Emote `<img>` tags in a
+  comment body become a private-use placeholder rune in `Comment.Body`
+  that indexes `Comment.Emotes` (first GIF frame, drawn 40px tall).
+  Emote URLs are fetched once per process (`internal/comments/emote.go`
+  cache, failures included); a dead emote leaves an empty slot and never
+  fails the comments page.
 - **Up to 5 pages per chapter.** Page 1 is server-rendered in the
   chapter HTML; pages 2..`maxCommentPages` (=5) are POSTed to
   `/frontend/comment/list`. The loop stops early at the first page
