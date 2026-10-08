@@ -69,11 +69,16 @@ Each chapter's reader comments are scraped and rendered into a single
 `zzz-comments.png` page inside the chapter folder (the `zzz-` prefix
 sorts it last in the `.cbz`). Logic lives in `internal/comments/`.
 
-- **Only top-level (parent) comments are scraped.** `Scrape` posts
-  `parent_id=0` and the parser matches `comment-main-level` articles
-  only. Nested replies — the "N phản hồi" expanders loaded in the
-  browser via `loadReply(<id>)` — are **deliberately not fetched** and
-  are not in the archive. Don't assume replies are covered.
+- **Replies are scraped one level deep.** A top-level comment with a
+  "N phản hồi" expander gets `Comment.Replies` from the same endpoint
+  with `parent_id=<id>` (what the browser's `loadReply(<id>)` does).
+  The site threads a reply-to-a-reply under the same top-level comment,
+  so there is no deeper nesting. The replied-to name (the `<strong>` that
+  opens the body) goes into `ReplyTo` and renders as `@name`. Reply
+  paging is unverified: `scrapeReplies` asks for `page=2..` only while
+  short of the expander count and the last page brought new IDs. Reply
+  failures are swallowed and never fail the chapter. Replies render
+  indented under their comment with a thread bar.
 - **Site emotes render as still images.** Emote `<img>` tags in a
   comment body become a private-use placeholder rune in `Comment.Body`
   that indexes `Comment.Emotes` (first GIF frame, drawn 40px tall).
@@ -178,8 +183,8 @@ every `<manga-root>/.chapters.json` to the new host.
 
 - One source site (the one whose selectors live in
   `internal/site/source/`).
-- Reader **replies are not scraped** — only top-level comments, up to
-  5 pages (see [Comments](#comments)).
+- Comments are capped at 5 top-level pages per chapter (replies to
+  those comments are included; see [Comments](#comments)).
 - Cookie expires mid-run on very long mangas; the user has to
   refresh and re-invoke with `--resume`. There is no automated
   refresh path because re-solving Turnstile requires a human.

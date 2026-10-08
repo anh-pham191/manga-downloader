@@ -42,6 +42,15 @@ const (
 	emoteGap        = 4
 	textLineHeight  = int(bodySize * lineSpacing)
 	emoteLineHeight = emoteSize + textLineHeight - int(bodySize)
+
+	// Replies sit under their comment, indented past a thin thread bar
+	// like the site's own layout, with a smaller name and tighter rows.
+	replyIndent   = 48
+	replyNameSize = 20.0
+	replyPad      = 6
+	replyBarWidth = 3
+	replyLevelGap = 200
+	topLevelGap   = 220
 )
 
 var (
@@ -49,6 +58,7 @@ var (
 	textColor = color.RGBA{0x22, 0x22, 0x22, 0xff}
 	metaColor = color.RGBA{0x88, 0x88, 0x88, 0xff}
 	sepColor  = color.RGBA{0xdd, 0xdd, 0xdd, 0xff}
+	barColor  = color.RGBA{0xcc, 0xcc, 0xcc, 0xff}
 )
 
 // Render writes a PNG comment page to w. Callers should not invoke
@@ -101,15 +111,53 @@ func Render(cs []Comment, w io.Writer) error {
 
 type commentBlock struct {
 	comment     Comment
-	bodyLines   []string // already wrapped to contentWidth
+	bodyLines   []string // already wrapped to the entry's width
 	lineHeights []int    // per body line; taller when the line holds an emote
-	height      int
+	ownHeight   int      // this entry alone, without replies or separator
+	height      int      // whole block: entry + replies + separator
+	replies     []commentBlock
 }
 
+// entryStyle is what differs between a top-level comment and a reply.
+type entryStyle struct {
+	indent   int
+	nameSize float64
+	levelGap int
+	padTop   int
+	padBot   int
+}
+
+var (
+	topStyle   = entryStyle{0, nameSize, topLevelGap, commentPadTop, commentPadBot}
+	replyStyle = entryStyle{replyIndent, replyNameSize, replyLevelGap, replyPad, replyPad}
+)
+
 func layoutComment(c Comment, regular *opentype.Font, gtRegular *gtfont.Face) commentBlock {
-	var nameRowHeightF float64 = nameSize * lineSpacing
-	nameRowHeight := int(nameRowHeightF)
-	lines := wrapBody(c.Body, c.Emotes, gtRegular, bodySize, contentWidth)
+	b := layoutEntry(c, topStyle, gtRegular)
+	b.height = b.ownHeight
+	for _, r := range c.Replies {
+		rb := layoutEntry(r, replyStyle, gtRegular)
+		b.replies = append(b.replies, rb)
+		b.height += rb.ownHeight
+	}
+	if len(b.replies) > 0 {
+		b.height += commentPadBot - replyPad
+	}
+	b.height += sepHeight
+	return b
+}
+
+// replyBody prefixes the answered name the way the site shows it.
+func replyBody(c Comment) string {
+	if c.ReplyTo == "" {
+		return c.Body
+	}
+	return "@" + c.ReplyTo + " " + c.Body
+}
+
+func layoutEntry(c Comment, st entryStyle, gtRegular *gtfont.Face) commentBlock {
+	nameRowHeight := int(st.nameSize * lineSpacing)
+	lines := wrapBody(replyBody(c), c.Emotes, gtRegular, bodySize, contentWidth-st.indent)
 	heights := make([]int, len(lines))
 	bodyHeight := 0
 	for i, l := range lines {
@@ -126,7 +174,7 @@ func layoutComment(c Comment, regular *opentype.Font, gtRegular *gtfont.Face) co
 		comment:     c,
 		bodyLines:   lines,
 		lineHeights: heights,
-		height:      commentPadTop + nameRowHeight + bodyHeight + commentPadBot + sepHeight,
+		ownHeight:   st.padTop + nameRowHeight + bodyHeight + st.padBot,
 	}
 }
 
@@ -260,28 +308,46 @@ func drawHeader(img *image.RGBA, n int, bold *opentype.Font) {
 }
 
 func drawComment(img *image.RGBA, b commentBlock, y int, regular, bold *opentype.Font) {
-	cy := y + commentPadTop
-	drawTextLine(img, b.comment.Name, sideMargin, cy+20, bold, nameSize, textColor, nil)
+	drawEntry(img, b, y, topStyle, regular, bold)
+	ry := y + b.ownHeight
+	if len(b.replies) > 0 {
+		barX := sideMargin + replyIndent/2 - 1
+		top := ry
+		for _, r := range b.replies {
+			drawEntry(img, r, ry, replyStyle, regular, bold)
+			ry += r.ownHeight
+		}
+		fillRect(img, image.Rect(barX, top+replyPad, barX+replyBarWidth, ry-replyPad), barColor)
+	}
+	drawHLine(img, y+b.height-1, sepColor)
+}
+
+func drawEntry(img *image.RGBA, b commentBlock, y int, st entryStyle, regular, bold *opentype.Font) {
+	x := sideMargin + st.indent
+	cy := y + st.padTop
+	nameBaseline := cy + int(st.nameSize) - 4
+	drawTextLine(img, b.comment.Name, x, nameBaseline, bold, st.nameSize, textColor, nil)
 	if b.comment.Level != "" {
-		drawTextLine(img, "· "+b.comment.Level, sideMargin+220, cy+20, regular, 16, metaColor, nil)
+		drawTextLine(img, "· "+b.comment.Level, x+st.levelGap, nameBaseline, regular, 16, metaColor, nil)
 	}
 	if b.comment.LikeCount > 0 {
 		like := fmt.Sprintf("♥ %d", b.comment.LikeCount)
-		drawTextLine(img, like, canvasWidth-sideMargin-80, cy+20, regular, 16, metaColor, nil)
+		drawTextLine(img, like, canvasWidth-sideMargin-80, nameBaseline, regular, 16, metaColor, nil)
 	}
-	var nameLineAdvanceF float64 = nameSize * lineSpacing
-	cy += int(nameLineAdvanceF)
+	cy += int(st.nameSize * lineSpacing)
 
 	for i, line := range b.bodyLines {
 		lh := b.lineHeights[i]
 		// Baseline sits a text line's descent above the bottom of the
 		// row, so emote rows keep text and images bottom-aligned.
 		baseline := cy + lh - (textLineHeight - int(bodySize))
-		drawTextLine(img, line, sideMargin, baseline, regular, bodySize, textColor, b.comment.Emotes)
+		drawTextLine(img, line, x, baseline, regular, bodySize, textColor, b.comment.Emotes)
 		cy += lh
 	}
+}
 
-	drawHLine(img, y+b.height-1, sepColor)
+func fillRect(img *image.RGBA, r image.Rectangle, col color.Color) {
+	draw.Draw(img, r.Intersect(img.Bounds()), &image.Uniform{col}, image.Point{}, draw.Src)
 }
 
 // emojiKey builds the Twemoji filename key from a grapheme cluster:
