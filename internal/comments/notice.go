@@ -42,10 +42,10 @@ func RenderNotice(lines []string, w io.Writer) error {
 	draw.Draw(img, img.Bounds(), &image.Uniform{bgColor}, image.Point{}, draw.Src)
 
 	y := padTop + int(titleSize)
-	drawTextLine(img, lines[0], sideMargin, y, bold, titleSize, textColor)
+	drawTextLine(img, lines[0], sideMargin, y, bold, titleSize, textColor, nil)
 	y += 24 + lineH
 	for _, l := range lines[1:] {
-		drawTextLine(img, l, sideMargin, y, regular, bodySize, metaColor)
+		drawTextLine(img, l, sideMargin, y, regular, bodySize, metaColor, nil)
 		y += lineH
 	}
 	return png.Encode(w, img)

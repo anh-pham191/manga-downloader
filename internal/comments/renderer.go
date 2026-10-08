@@ -17,6 +17,7 @@ import (
 	"github.com/go-text/typesetting/language"
 	"github.com/go-text/typesetting/shaping"
 	"github.com/rivo/uniseg"
+	xdraw "golang.org/x/image/draw"
 	xfont "golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
@@ -33,6 +34,14 @@ const (
 	bodySize      = 20.0
 	nameSize      = 24.0
 	lineSpacing   = 1.4
+
+	// Site emotes are 50px GIFs drawn as pictures, not glyphs; at body
+	// text size (20px) they're unreadable, so they get their own size
+	// and a taller line instead.
+	emoteSize       = 40
+	emoteGap        = 4
+	textLineHeight  = int(bodySize * lineSpacing)
+	emoteLineHeight = emoteSize + textLineHeight - int(bodySize)
 )
 
 var (
@@ -91,24 +100,33 @@ func Render(cs []Comment, w io.Writer) error {
 }
 
 type commentBlock struct {
-	comment   Comment
-	bodyLines []string // already wrapped to contentWidth
-	height    int
+	comment     Comment
+	bodyLines   []string // already wrapped to contentWidth
+	lineHeights []int    // per body line; taller when the line holds an emote
+	height      int
 }
 
 func layoutComment(c Comment, regular *opentype.Font, gtRegular *gtfont.Face) commentBlock {
 	var nameRowHeightF float64 = nameSize * lineSpacing
 	nameRowHeight := int(nameRowHeightF)
-	lines := wrapBody(c.Body, gtRegular, bodySize, contentWidth)
-	lineCount := len(lines)
-	if lineCount == 0 {
-		lineCount = 1
+	lines := wrapBody(c.Body, c.Emotes, gtRegular, bodySize, contentWidth)
+	heights := make([]int, len(lines))
+	bodyHeight := 0
+	for i, l := range lines {
+		heights[i] = textLineHeight
+		if hasEmote(l, c.Emotes) {
+			heights[i] = emoteLineHeight
+		}
+		bodyHeight += heights[i]
 	}
-	bodyHeight := int(bodySize*lineSpacing) * lineCount
+	if len(lines) == 0 {
+		bodyHeight = textLineHeight
+	}
 	return commentBlock{
-		comment:   c,
-		bodyLines: lines,
-		height:    commentPadTop + nameRowHeight + bodyHeight + commentPadBot + sepHeight,
+		comment:     c,
+		bodyLines:   lines,
+		lineHeights: heights,
+		height:      commentPadTop + nameRowHeight + bodyHeight + commentPadBot + sepHeight,
 	}
 }
 
@@ -135,7 +153,66 @@ func shapeString(text string, gtFace *gtfont.Face, size float64) fixed.Int26_6 {
 	return out.Advance
 }
 
-func wrapBody(body string, gtRegular *gtfont.Face, size float64, maxWidth int) []string {
+// emoteAt returns the emote image a grapheme cluster stands for. ok is
+// true for any placeholder, even one whose image failed to load (nil).
+func emoteAt(cluster string, emotes []image.Image) (img image.Image, ok bool) {
+	r, n := utf8.DecodeRuneInString(cluster)
+	i, isSlot := emoteIndex(r)
+	if !isSlot || n != len(cluster) {
+		return nil, false
+	}
+	if i < len(emotes) {
+		return emotes[i], true
+	}
+	return nil, true
+}
+
+func hasEmote(line string, emotes []image.Image) bool {
+	for _, r := range line {
+		if img, ok := emoteAt(string(r), emotes); ok && img != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// emoteWidth is the drawn width of an emote scaled to emoteSize tall,
+// capped so a banner-shaped image can't push a line off the page.
+func emoteWidth(img image.Image) int {
+	if img == nil {
+		return 0
+	}
+	b := img.Bounds()
+	w := b.Dx() * emoteSize / b.Dy()
+	if w > 4*emoteSize {
+		w = 4 * emoteSize
+	}
+	return w
+}
+
+// measureLine shapes the text runs of a line and adds the emote slots,
+// which the font knows nothing about.
+func measureLine(text string, emotes []image.Image, gtFace *gtfont.Face, size float64) fixed.Int26_6 {
+	if !strings.ContainsFunc(text, isPUA) {
+		return shapeString(text, gtFace, size)
+	}
+	var total fixed.Int26_6
+	var run strings.Builder
+	for _, r := range text {
+		if img, ok := emoteAt(string(r), emotes); ok {
+			total += shapeString(run.String(), gtFace, size)
+			run.Reset()
+			if img != nil {
+				total += fixed.I(emoteWidth(img) + emoteGap)
+			}
+			continue
+		}
+		run.WriteRune(r)
+	}
+	return total + shapeString(run.String(), gtFace, size)
+}
+
+func wrapBody(body string, emotes []image.Image, gtRegular *gtfont.Face, size float64, maxWidth int) []string {
 	if body == "" {
 		return nil
 	}
@@ -145,12 +222,12 @@ func wrapBody(body string, gtRegular *gtfont.Face, size float64, maxWidth int) [
 		if para == "" {
 			continue
 		}
-		out = append(out, wrapParagraph(para, gtRegular, size, maxWidth)...)
+		out = append(out, wrapParagraph(para, emotes, gtRegular, size, maxWidth)...)
 	}
 	return out
 }
 
-func wrapParagraph(text string, gtFace *gtfont.Face, size float64, maxWidth int) []string {
+func wrapParagraph(text string, emotes []image.Image, gtFace *gtfont.Face, size float64, maxWidth int) []string {
 	g := uniseg.NewGraphemes(text)
 	var clusters []string
 	for g.Next() {
@@ -162,7 +239,7 @@ func wrapParagraph(text string, gtFace *gtfont.Face, size float64, maxWidth int)
 	maxFixed := fixed.I(maxWidth)
 	for _, cluster := range clusters {
 		candidate := strings.Join(append(append([]string{}, current...), cluster), "")
-		adv := shapeString(candidate, gtFace, size)
+		adv := measureLine(candidate, emotes, gtFace, size)
 		if adv > maxFixed && len(current) > 0 {
 			lines = append(lines, strings.Join(current, ""))
 			current = []string{cluster}
@@ -178,26 +255,30 @@ func wrapParagraph(text string, gtFace *gtfont.Face, size float64, maxWidth int)
 
 func drawHeader(img *image.RGBA, n int, bold *opentype.Font) {
 	title := fmt.Sprintf("Bình Luận (%d)", n)
-	drawTextLine(img, title, sideMargin, headerHeight/2+10, bold, nameSize, textColor)
+	drawTextLine(img, title, sideMargin, headerHeight/2+10, bold, nameSize, textColor, nil)
 	drawHLine(img, headerHeight-1, sepColor)
 }
 
 func drawComment(img *image.RGBA, b commentBlock, y int, regular, bold *opentype.Font) {
 	cy := y + commentPadTop
-	drawTextLine(img, b.comment.Name, sideMargin, cy+20, bold, nameSize, textColor)
+	drawTextLine(img, b.comment.Name, sideMargin, cy+20, bold, nameSize, textColor, nil)
 	if b.comment.Level != "" {
-		drawTextLine(img, "· "+b.comment.Level, sideMargin+220, cy+20, regular, 16, metaColor)
+		drawTextLine(img, "· "+b.comment.Level, sideMargin+220, cy+20, regular, 16, metaColor, nil)
 	}
 	if b.comment.LikeCount > 0 {
 		like := fmt.Sprintf("♥ %d", b.comment.LikeCount)
-		drawTextLine(img, like, canvasWidth-sideMargin-80, cy+20, regular, 16, metaColor)
+		drawTextLine(img, like, canvasWidth-sideMargin-80, cy+20, regular, 16, metaColor, nil)
 	}
 	var nameLineAdvanceF float64 = nameSize * lineSpacing
 	cy += int(nameLineAdvanceF)
 
-	for _, line := range b.bodyLines {
-		drawTextLine(img, line, sideMargin, cy+int(bodySize), regular, bodySize, textColor)
-		cy += int(bodySize * lineSpacing)
+	for i, line := range b.bodyLines {
+		lh := b.lineHeights[i]
+		// Baseline sits a text line's descent above the bottom of the
+		// row, so emote rows keep text and images bottom-aligned.
+		baseline := cy + lh - (textLineHeight - int(bodySize))
+		drawTextLine(img, line, sideMargin, baseline, regular, bodySize, textColor, b.comment.Emotes)
+		cy += lh
 	}
 
 	drawHLine(img, y+b.height-1, sepColor)
@@ -256,15 +337,16 @@ func scaleImage(src image.Image, w, h int) *image.RGBA {
 }
 
 // drawTextLine draws one line of text at (x, y). Emoji grapheme clusters
-// whose leading rune is >= U+1F000 are composited as Twemoji PNGs inline.
-func drawTextLine(img *image.RGBA, text string, x, y int, f *opentype.Font, size float64, col color.Color) {
+// whose leading rune is >= U+1F000 are composited as Twemoji PNGs inline;
+// emote placeholders are swapped for their image from emotes.
+func drawTextLine(img *image.RGBA, text string, x, y int, f *opentype.Font, size float64, col color.Color, emotes []image.Image) {
 	face, err := opentype.NewFace(f, &opentype.FaceOptions{Size: size, DPI: 72})
 	if err != nil {
 		return
 	}
 	defer face.Close()
 
-	if !strings.ContainsFunc(text, func(r rune) bool { return r >= 0x1F000 }) {
+	if !strings.ContainsFunc(text, func(r rune) bool { return r >= 0x1F000 || isPUA(r) }) {
 		// Fast path: no emoji in the line.
 		(&xfont.Drawer{
 			Dst:  img,
@@ -279,6 +361,17 @@ func drawTextLine(img *image.RGBA, text string, x, y int, f *opentype.Font, size
 	g := uniseg.NewGraphemes(text)
 	for g.Next() {
 		cluster := g.Str()
+		if ei, ok := emoteAt(cluster, emotes); ok {
+			// A nil emote failed to load: leave no gap rather than a
+			// tofu box for the placeholder rune.
+			if ei != nil {
+				w := emoteWidth(ei)
+				rect := image.Rect(cx.Round(), y-emoteSize+4, cx.Round()+w, y+4)
+				xdraw.CatmullRom.Scale(img, rect, ei, ei.Bounds(), draw.Over, nil)
+				cx += fixed.I(w + emoteGap)
+			}
+			continue
+		}
 		if !looksLikeEmoji(cluster) {
 			d := &xfont.Drawer{
 				Dst:  img,
